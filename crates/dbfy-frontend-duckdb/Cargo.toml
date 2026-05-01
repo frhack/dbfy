@@ -37,6 +37,7 @@ duckdb = [
     "dep:url",
     "dep:serde",
     "dep:serde_yaml",
+    "dep:cc",
     "duckdb?/bundled",
     "duckdb?/vtab",
 ]
@@ -61,6 +62,9 @@ serde = { workspace = true, optional = true }
 serde_yaml = { workspace = true, optional = true }
 tokio.workspace = true
 url = { workspace = true, optional = true }
+
+[build-dependencies]
+cc = { version = "1.2", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0.149"

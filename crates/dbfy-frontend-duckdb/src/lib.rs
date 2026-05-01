@@ -39,6 +39,39 @@ mod rest_vtab;
 #[cfg(any(feature = "duckdb", feature = "loadable_extension"))]
 mod rows_file_vtab;
 
+/// Bundled-only C++ shim. Compiled by `build.rs` when the `duckdb`
+/// feature is active; not linked in `loadable_extension` builds since
+/// the loadable artefact only sees the C API. Step-1 spike: `probe`
+/// just returns a sentinel to confirm the link works end-to-end.
+#[cfg(all(feature = "duckdb", not(feature = "loadable_extension")))]
+mod shim {
+    use std::ffi::CStr;
+
+    unsafe extern "C" {
+        fn dbfy_shim_probe() -> u32;
+        fn dbfy_shim_duckdb_version() -> *const std::os::raw::c_char;
+    }
+
+    /// Confirm the C++ shim was compiled and linked. Returns 0xDBFEC5
+    /// on success. Calling this from a test proves the build pipeline
+    /// is functional without depending on any DuckDB internals yet.
+    pub fn probe() -> u32 {
+        unsafe { dbfy_shim_probe() }
+    }
+
+    /// Bundled DuckDB library version, as reported by `duckdb::DuckDB::LibraryVersion()`.
+    /// Confirms the shim can reach into the C++ side of DuckDB.
+    pub fn duckdb_version() -> &'static str {
+        unsafe {
+            let p = dbfy_shim_duckdb_version();
+            CStr::from_ptr(p).to_str().expect("duckdb version is valid utf-8")
+        }
+    }
+}
+
+#[cfg(all(feature = "duckdb", not(feature = "loadable_extension")))]
+pub use shim::{duckdb_version as shim_duckdb_version, probe as shim_probe};
+
 #[cfg(any(feature = "duckdb", feature = "loadable_extension"))]
 pub use rest_vtab::register as register_rest;
 #[cfg(any(feature = "duckdb", feature = "loadable_extension"))]

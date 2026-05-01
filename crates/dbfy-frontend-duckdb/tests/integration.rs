@@ -14,6 +14,29 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[test]
+fn cpp_shim_is_linked_and_callable() {
+    // Sentinel proves the C++ shim was compiled by build.rs and linked
+    // into the rlib. If this test fails, the shim is silently dropped
+    // (no link error) and downstream filter-pushdown work is dead on
+    // arrival — fail loud here instead.
+    assert_eq!(dbfy_duckdb::shim_probe(), 0x00DBFEC5);
+}
+
+#[test]
+fn cpp_shim_can_reach_duckdb_cpp_side() {
+    // Calling `duckdb::DuckDB::LibraryVersion()` from C++ confirms the
+    // shim's `#include "duckdb.hpp"` resolved against libduckdb-sys's
+    // extracted headers AND that the bundled libduckdb provides the
+    // resolved symbol at link time. Without this, step 2 (writing the
+    // OptimizerExtension) would fail with cryptic linker errors.
+    let version = dbfy_duckdb::shim_duckdb_version();
+    assert!(
+        version.starts_with("v"),
+        "expected DuckDB version string starting with 'v', got `{version}`"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dbfy_rest_round_trip() {
     let server = MockServer::start().await;
