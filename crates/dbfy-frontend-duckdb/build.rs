@@ -23,9 +23,13 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=DEP_DUCKDB_INCLUDE");
 
-    if cfg!(feature = "duckdb") && !cfg!(feature = "loadable_extension") {
-        bundled::compile_shim();
-    }
+    // Compile-time gate via `#[cfg]` (not `cfg!`): the `bundled` module
+    // is itself `#[cfg(feature = "duckdb")]`-gated, so referencing it
+    // unconditionally — even from a runtime-false `if cfg!(…)` branch —
+    // fails to resolve when the `duckdb` feature is off (e.g. release
+    // builds with `--features loadable_extension`).
+    #[cfg(all(feature = "duckdb", not(feature = "loadable_extension")))]
+    bundled::compile_shim();
 }
 
 #[cfg(feature = "duckdb")]

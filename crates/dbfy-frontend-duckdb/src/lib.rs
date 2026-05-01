@@ -155,6 +155,36 @@ pub use shim::{
     take_pushdown_filters,
 };
 
+/// Loadable-extension stub for the bundled-only shim. The C++
+/// `OptimizerExtension` is compiled into bundled-mode rlibs only; the
+/// `.duckdb_extension` cdylib that loadable-extension produces talks to
+/// DuckDB exclusively through the C API, which today does not expose
+/// query-level optimizer hooks. Under this feature combination both
+/// `vtab` files still need to compile, so we provide a shim with the
+/// same surface but with `take_pushdown_filters` always returning
+/// `Ok(None)`. DuckDB still applies the WHERE clause above the scan,
+/// so correctness is preserved — only pushdown is forfeited.
+#[cfg(feature = "loadable_extension")]
+mod shim {
+    use std::convert::Infallible;
+    use std::ffi::c_void;
+
+    pub struct PushdownFilter {
+        pub column: String,
+        pub op: String,
+        pub value: String,
+        pub duck_type: String,
+    }
+
+    /// Always `Ok(None)` in loadable-extension mode — there's no C++
+    /// shim writing to a side channel here.
+    pub unsafe fn take_pushdown_filters(
+        _bind_data: *mut c_void,
+    ) -> Result<Option<Vec<PushdownFilter>>, Infallible> {
+        Ok(None)
+    }
+}
+
 #[cfg(any(feature = "duckdb", feature = "loadable_extension"))]
 pub use rest_vtab::register as register_rest;
 #[cfg(any(feature = "duckdb", feature = "loadable_extension"))]
