@@ -60,9 +60,8 @@ impl JsonlParser {
         let mut paths = Vec::with_capacity(columns.len());
         let mut fields = Vec::with_capacity(columns.len());
         for c in &columns {
-            let path = JsonPath::parse(&c.path).map_err(|err| {
-                ParseError::from(format!("invalid JSONPath `{}`: {err}", c.path))
-            })?;
+            let path = JsonPath::parse(&c.path)
+                .map_err(|err| ParseError::from(format!("invalid JSONPath `{}`: {err}", c.path)))?;
             paths.push(path);
             fields.push(Field::new(&c.name, c.data_type.arrow(), true));
         }

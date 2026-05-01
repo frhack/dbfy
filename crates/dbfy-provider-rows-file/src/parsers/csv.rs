@@ -112,9 +112,8 @@ impl LineParser for CsvParser {
 
         let mut first_row = true;
         for result in rdr.records() {
-            let record = result.map_err(|err| {
-                ParseError::from(format!("csv: malformed record: {err}"))
-            })?;
+            let record =
+                result.map_err(|err| ParseError::from(format!("csv: malformed record: {err}")))?;
             if first_row && self.has_header {
                 first_row = false;
                 continue;

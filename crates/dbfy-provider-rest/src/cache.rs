@@ -102,11 +102,7 @@ impl HttpCache {
     /// the originating caller; concurrent waiters are woken and will
     /// see the slot vanish, then retry the fetch themselves. This keeps
     /// transient failures from poisoning subsequent requests.
-    pub(crate) async fn get_or_fetch<F, Fut>(
-        &self,
-        url: &Url,
-        fetch: F,
-    ) -> Result<HttpPageResponse>
+    pub(crate) async fn get_or_fetch<F, Fut>(&self, url: &Url, fetch: F) -> Result<HttpPageResponse>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<HttpPageResponse>>,
@@ -224,4 +220,3 @@ impl HttpCache {
         Self::new(Duration::from_secs(cfg.ttl_seconds), cfg.max_entries)
     }
 }
-

@@ -114,9 +114,7 @@ pub extern "C" fn dbfy_engine_new_empty() -> *mut DbfyEngine {
     }))
 }
 
-fn build_engine(
-    engine: Result<Engine, dbfy_frontend_datafusion::EngineError>,
-) -> *mut DbfyEngine {
+fn build_engine(engine: Result<Engine, dbfy_frontend_datafusion::EngineError>) -> *mut DbfyEngine {
     let engine = match engine {
         Ok(e) => e,
         Err(err) => {

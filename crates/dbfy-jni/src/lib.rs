@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
+use dbfy_config::Config;
+use dbfy_frontend_datafusion::Engine;
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::{jbyteArray, jlong, jstring};
-use dbfy_config::Config;
-use dbfy_frontend_datafusion::Engine;
 use tokio::runtime::Runtime;
 
 struct JniEngine {
@@ -165,7 +165,10 @@ pub extern "system" fn Java_com_dbfy_Dbfy_nativeQuery<'local>(
     }
 }
 
-fn build_engine(env: &mut JNIEnv, engine: Result<Engine, dbfy_frontend_datafusion::EngineError>) -> jlong {
+fn build_engine(
+    env: &mut JNIEnv,
+    engine: Result<Engine, dbfy_frontend_datafusion::EngineError>,
+) -> jlong {
     let engine = match engine {
         Ok(e) => e,
         Err(err) => {

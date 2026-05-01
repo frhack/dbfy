@@ -17,9 +17,9 @@ use dbfy_provider::{
 };
 use futures::stream::{self, StreamExt};
 
+use crate::RowsFileTable;
 use crate::indexer::IndexedColumn;
 use crate::parser::DynParser;
-use crate::RowsFileTable;
 
 /// Multi-file provider — same parser + indexed_columns applied to every
 /// file matched by the glob. Useful for log directories where each rotated
@@ -55,7 +55,13 @@ impl RowsFileGlob {
         }
         let tables: Vec<Arc<RowsFileTable>> = paths
             .into_iter()
-            .map(|p| Arc::new(RowsFileTable::new(p, parser.clone(), indexed_columns.clone())))
+            .map(|p| {
+                Arc::new(RowsFileTable::new(
+                    p,
+                    parser.clone(),
+                    indexed_columns.clone(),
+                ))
+            })
             .collect();
         // Each table reports the same schema (driven by the parser); pick
         // the first as canonical.

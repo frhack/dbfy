@@ -38,7 +38,10 @@ mod bundled {
              DEP_DUCKDB_INCLUDE was set nor a libduckdb-sys-* build dir \
              was found in the target tree",
         );
-        eprintln!("dbfy: compiling C++ shim against headers at {}", include.display());
+        eprintln!(
+            "dbfy: compiling C++ shim against headers at {}",
+            include.display()
+        );
 
         cc::Build::new()
             .cpp(true)

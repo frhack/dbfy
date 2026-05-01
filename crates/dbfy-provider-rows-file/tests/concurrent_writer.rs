@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use dbfy_provider::{ProgrammaticTableProvider, ScanRequest};
 use dbfy_provider_rows_file::parsers::JsonlColumn;
-use dbfy_provider_rows_file::parsers::jsonl::JsonlType;
 use dbfy_provider_rows_file::parsers::JsonlParser;
+use dbfy_provider_rows_file::parsers::jsonl::JsonlType;
 use dbfy_provider_rows_file::{IndexKind, IndexedColumn, RowsFileTable};
 use futures::StreamExt;
 use tempfile::TempDir;

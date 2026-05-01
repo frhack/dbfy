@@ -5,11 +5,9 @@ use std::io::Write;
 use std::sync::Arc;
 
 use dbfy_provider_rows_file::parsers::JsonlColumn;
-use dbfy_provider_rows_file::parsers::jsonl::JsonlType;
 use dbfy_provider_rows_file::parsers::JsonlParser;
-use dbfy_provider_rows_file::{
-    Decision, FileSnapshot, IndexKind, IndexedColumn, RowsFileTable,
-};
+use dbfy_provider_rows_file::parsers::jsonl::JsonlType;
+use dbfy_provider_rows_file::{Decision, FileSnapshot, IndexKind, IndexedColumn, RowsFileTable};
 use tempfile::TempDir;
 
 fn write_jsonl(path: &std::path::Path, rows: &[(i64, &str)]) {
@@ -21,10 +19,7 @@ fn write_jsonl(path: &std::path::Path, rows: &[(i64, &str)]) {
 }
 
 fn append_jsonl(path: &std::path::Path, rows: &[(i64, &str)]) {
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .unwrap();
+    let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
     for (id, name) in rows {
         writeln!(f, r#"{{"id": {id}, "name": "{name}"}}"#).unwrap();
     }
@@ -134,9 +129,21 @@ async fn mid_file_edit_emits_rebuild() {
         .truncate(true)
         .open(&path)
         .unwrap();
-    writeln!(f, r#"{{"id": 99, "name": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"}}"#).unwrap();
-    writeln!(f, r#"{{"id": 88, "name": "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY"}}"#).unwrap();
-    writeln!(f, r#"{{"id": 77, "name": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"}}"#).unwrap();
+    writeln!(
+        f,
+        r#"{{"id": 99, "name": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"}}"#
+    )
+    .unwrap();
+    writeln!(
+        f,
+        r#"{{"id": 88, "name": "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY"}}"#
+    )
+    .unwrap();
+    writeln!(
+        f,
+        r#"{{"id": 77, "name": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"}}"#
+    )
+    .unwrap();
     f.flush().unwrap();
     drop(f);
 

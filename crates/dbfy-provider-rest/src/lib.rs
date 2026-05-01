@@ -12,14 +12,14 @@ use arrow_array::builder::{
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::SchemaRef;
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
-use futures::SinkExt;
-use futures::stream::BoxStream;
-use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
-use reqwest::{Client, StatusCode, Url};
 use dbfy_config::{
     ApiKeyLocation, AuthConfig, DataType, LimitPushdownConfig, PaginationConfig,
     ProjectionPushdownConfig, ProjectionStyle, RestSourceConfig, RestTableConfig,
 };
+use futures::SinkExt;
+use futures::stream::BoxStream;
+use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use reqwest::{Client, StatusCode, Url};
 use serde_json::Value;
 use serde_json_path::JsonPath;
 use thiserror::Error;
@@ -1250,12 +1250,11 @@ fn extract_optional_string_path(
     source_name: &str,
     table_name: &str,
 ) -> Result<Option<String>> {
-    let parsed =
-        JsonPath::parse(path).map_err(|_| RestProviderError::UnsupportedCursorPath {
-            source_name: source_name.to_string(),
-            table: table_name.to_string(),
-            path: path.to_string(),
-        })?;
+    let parsed = JsonPath::parse(path).map_err(|_| RestProviderError::UnsupportedCursorPath {
+        source_name: source_name.to_string(),
+        table: table_name.to_string(),
+        path: path.to_string(),
+    })?;
 
     match parsed.query(row).first() {
         Some(Value::String(value)) => Ok(Some(value.clone())),
@@ -2058,11 +2057,7 @@ mod tests {
         );
 
         let result = table
-            .execute(
-                &["id".to_string(), "first_tag".to_string()],
-                &[],
-                None,
-            )
+            .execute(&["id".to_string(), "first_tag".to_string()], &[], None)
             .await
             .expect("array-index column path should resolve");
 

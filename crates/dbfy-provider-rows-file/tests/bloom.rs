@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use dbfy_provider::{FilterOperator, ScalarValue, SimpleFilter};
 use dbfy_provider_rows_file::parsers::JsonlColumn;
-use dbfy_provider_rows_file::parsers::jsonl::JsonlType;
 use dbfy_provider_rows_file::parsers::JsonlParser;
+use dbfy_provider_rows_file::parsers::jsonl::JsonlType;
 use dbfy_provider_rows_file::{IndexKind, IndexedColumn, RowsFileTable};
 use tempfile::TempDir;
 

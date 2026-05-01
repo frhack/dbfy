@@ -68,7 +68,9 @@ async fn optimizer_hook_observes_filter_pushdown_candidates() {
         let r = unsafe { ffi::duckdb_open(path.as_ptr(), &mut raw_db) };
         assert_eq!(r, ffi::DuckDBSuccess, "duckdb_open failed");
 
-        unsafe { dbfy_duckdb::install_optimizer_hook(raw_db).expect("install hook"); }
+        unsafe {
+            dbfy_duckdb::install_optimizer_hook(raw_db).expect("install hook");
+        }
 
         let conn = unsafe { Connection::open_from_raw(raw_db) }.expect("open_from_raw");
         dbfy_duckdb::register(&conn).expect("register dbfy");
@@ -194,8 +196,11 @@ pushdown:
     // Expect Anna + Luca (the active rows the matching mock returned).
     // If pushdown didn't fire, the fallback mock would have returned
     // a single FALLBACK row and this assert would catch it.
-    assert_eq!(names, vec!["Anna".to_string(), "Luca".to_string()],
-        "filter pushdown did not produce the expected query params");
+    assert_eq!(
+        names,
+        vec!["Anna".to_string(), "Luca".to_string()],
+        "filter pushdown did not produce the expected query params"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -231,9 +236,7 @@ async fn dbfy_rest_round_trip() {
             .query_map([], |row| Ok((row.get::<_, String>(0)?,)))
             .expect("query_map")
             .collect::<Vec<_>>();
-        rows.drain(..)
-            .map(|r| r.expect("row"))
-            .collect()
+        rows.drain(..).map(|r| r.expect("row")).collect()
     })
     .await
     .expect("blocking");
@@ -242,7 +245,11 @@ async fn dbfy_rest_round_trip() {
     // Each row is the JSON object as a string. We assert containment rather
     // than exact byte form because key ordering in serde_json output is
     // stable for objects but not portable across all versions.
-    let joined: String = rows.iter().map(|(s,)| s.as_str()).collect::<Vec<_>>().join("\n");
+    let joined: String = rows
+        .iter()
+        .map(|(s,)| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(joined.contains("\"Mario\""), "missing Mario: {joined}");
     assert!(joined.contains("\"Anna\""), "missing Anna: {joined}");
     assert!(joined.contains("\"Luca\""), "missing Luca: {joined}");
@@ -347,9 +354,7 @@ columns:
     let projected: Vec<(String, i64)> = tokio::task::spawn_blocking(move || {
         let conn = Connection::open_in_memory().expect("connection");
         dbfy_duckdb::register(&conn).expect("register");
-        let sql = format!(
-            "SELECT name, id FROM dbfy_rest('{url_a}', config := ?) ORDER BY id",
-        );
+        let sql = format!("SELECT name, id FROM dbfy_rest('{url_a}', config := ?) ORDER BY id",);
         let mut stmt = conn.prepare(&sql).expect("prepare");
         stmt.query_map([cfg_a], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -468,7 +473,8 @@ chunk_rows: 50
         move || {
             let conn = Connection::open_in_memory().expect("connection");
             dbfy_duckdb::register(&conn).expect("register");
-            let sql = "SELECT count(*) FROM dbfy_rows_file(?, config := ?) WHERE id BETWEEN 100 AND 119";
+            let sql =
+                "SELECT count(*) FROM dbfy_rows_file(?, config := ?) WHERE id BETWEEN 100 AND 119";
             let mut stmt = conn.prepare(sql).expect("prepare");
             stmt.query_row([&path_str, &cfg], |row| row.get::<_, i64>(0))
                 .expect("query_row")
@@ -486,7 +492,8 @@ chunk_rows: 50
         move || {
             let conn = Connection::open_in_memory().expect("connection");
             dbfy_duckdb::register(&conn).expect("register");
-            let sql = "SELECT id FROM dbfy_rows_file(?, config := ?) WHERE level = 'ERROR' ORDER BY id";
+            let sql =
+                "SELECT id FROM dbfy_rows_file(?, config := ?) WHERE level = 'ERROR' ORDER BY id";
             let mut stmt = conn.prepare(sql).expect("prepare");
             let rows: Vec<(i64,)> = stmt
                 .query_map([&path_str, &cfg], |row| Ok((row.get::<_, i64>(0)?,)))

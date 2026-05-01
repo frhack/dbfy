@@ -46,11 +46,7 @@ impl RowsFileHandle {
 /// are syntactically valid, etc) so failures here are mostly I/O — the
 /// glob expansion or the CSV header read.
 pub fn build_handle(cfg: &RowsFileTableConfig) -> ProviderResult<RowsFileHandle> {
-    let indexed: Vec<IndexedColumn> = cfg
-        .indexed_columns
-        .iter()
-        .map(map_indexed_column)
-        .collect();
+    let indexed: Vec<IndexedColumn> = cfg.indexed_columns.iter().map(map_indexed_column).collect();
 
     // For CSV with named columns we need a real file to read the header
     // from. Resolve a representative path: the explicit `path`, else the
@@ -74,8 +70,11 @@ pub fn build_handle(cfg: &RowsFileTableConfig) -> ProviderResult<RowsFileHandle>
         }
         Ok(RowsFileHandle::Single(Arc::new(table)))
     } else if let Some(pattern) = &cfg.glob {
-        let glob = RowsFileGlob::try_new(pattern, parser, indexed)
-            .map_err(|err| ProviderError::Generic { message: err.to_string() })?;
+        let glob = RowsFileGlob::try_new(pattern, parser, indexed).map_err(|err| {
+            ProviderError::Generic {
+                message: err.to_string(),
+            }
+        })?;
         Ok(RowsFileHandle::Glob(Arc::new(glob)))
     } else {
         Err(ProviderError::Generic {

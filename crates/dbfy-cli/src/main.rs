@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dbfy_config::{Config, SourceConfig};
-use dbfy_frontend_datafusion::{build_rows_file_handle, Engine, RowsFileHandle};
+use dbfy_frontend_datafusion::{Engine, RowsFileHandle, build_rows_file_handle};
 
 mod detect;
 mod duckdb_attach;
@@ -255,7 +255,9 @@ fn index_cmd(config_path: PathBuf, qualified: String, rebuild: bool) -> Result<(
     let (source_name, table_name) = qualified
         .split_once('.')
         .map(|(s, t)| (s.to_string(), t.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("table must be qualified as `source.table`, got `{qualified}`"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("table must be qualified as `source.table`, got `{qualified}`")
+        })?;
 
     let source = config
         .sources
@@ -264,13 +266,14 @@ fn index_cmd(config_path: PathBuf, qualified: String, rebuild: bool) -> Result<(
     let rf = match source {
         SourceConfig::RowsFile(rf) => rf,
         SourceConfig::Rest(_) => {
-            anyhow::bail!("source `{source_name}` is a REST source — `dbfy index` only operates on rows_file sources")
+            anyhow::bail!(
+                "source `{source_name}` is a REST source — `dbfy index` only operates on rows_file sources"
+            )
         }
     };
-    let table_cfg = rf
-        .tables
-        .get(&table_name)
-        .ok_or_else(|| anyhow::anyhow!("table `{table_name}` not found in source `{source_name}`"))?;
+    let table_cfg = rf.tables.get(&table_name).ok_or_else(|| {
+        anyhow::anyhow!("table `{table_name}` not found in source `{source_name}`")
+    })?;
 
     let handle = build_rows_file_handle(&source_name, &table_name, table_cfg)?;
     match handle {

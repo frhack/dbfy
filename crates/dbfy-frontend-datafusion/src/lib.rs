@@ -23,7 +23,6 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
-use futures::StreamExt;
 use dbfy_config::{Config, RowsFileTableConfig, SourceConfig};
 use dbfy_provider::{
     DynProvider, FilterOperator, ProviderCapabilities, ProviderError, ScalarValue, ScanRequest,
@@ -31,6 +30,7 @@ use dbfy_provider::{
 };
 use dbfy_provider_rest::{RestProviderError, RestTable, SimpleFilter as RestSimpleFilter};
 pub use dbfy_provider_rows_file::RowsFileHandle;
+use futures::StreamExt;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, EngineError>;
@@ -95,10 +95,9 @@ impl Engine {
                     for (table_name, table_config) in &rf.tables {
                         let provider =
                             build_rows_file_provider(source_name, table_name, table_config)?;
-                        engine.programmatic_tables.insert(
-                            qualify_table_name(source_name, table_name),
-                            provider,
-                        );
+                        engine
+                            .programmatic_tables
+                            .insert(qualify_table_name(source_name, table_name), provider);
                     }
                 }
             }
@@ -310,9 +309,13 @@ impl TableProvider for RestDataFusionTableProvider {
             .collect::<Result<Vec<_>>>()
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
 
-        let plan =
-            RestStreamExecutionPlan::try_new(self.table.clone(), projection_names, rest_filters, limit)
-                .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let plan = RestStreamExecutionPlan::try_new(
+            self.table.clone(),
+            projection_names,
+            rest_filters,
+            limit,
+        )
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
         Ok(Arc::new(plan))
     }
 }
@@ -1215,9 +1218,7 @@ fn describe_programmatic_capabilities(capabilities: &ProviderCapabilities) -> St
     parts.join(", ")
 }
 
-fn describe_filter_capabilities(
-    capabilities: &dbfy_provider::FilterCapabilities,
-) -> String {
+fn describe_filter_capabilities(capabilities: &dbfy_provider::FilterCapabilities) -> String {
     let mut parts = Vec::new();
     if !capabilities.equals.is_empty() {
         parts.push(format!("=:{}", sorted_join(&capabilities.equals)));
@@ -1317,11 +1318,9 @@ mod tests {
     use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use async_trait::async_trait;
-    use futures::stream;
     use dbfy_config::Config;
-    use dbfy_provider::{
-        ProgrammaticTableProvider, ProviderError, ProviderResult, ScanResponse,
-    };
+    use dbfy_provider::{ProgrammaticTableProvider, ProviderError, ProviderResult, ScanResponse};
+    use futures::stream;
     use serde_json::json;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1354,10 +1353,12 @@ mod tests {
             }
 
             async fn scan(&self, request: ScanRequest) -> ProviderResult<ScanResponse> {
-                self.captured.lock().unwrap().extend(request.filters.clone());
+                self.captured
+                    .lock()
+                    .unwrap()
+                    .extend(request.filters.clone());
                 let array = Arc::new(StringArray::from(vec!["alpha"])) as ArrayRef;
-                let batch =
-                    RecordBatch::try_new(self.schema.clone(), vec![array]).unwrap();
+                let batch = RecordBatch::try_new(self.schema.clone(), vec![array]).unwrap();
                 Ok(ScanResponse {
                     stream: Box::pin(stream::iter(vec![Ok(batch)])),
                     handled_filters: Vec::new(),
@@ -1386,7 +1387,11 @@ mod tests {
             .expect("query");
 
         let filters = captured.lock().unwrap().clone();
-        assert_eq!(filters.len(), 1, "expected one pushed filter, got {filters:?}");
+        assert_eq!(
+            filters.len(),
+            1,
+            "expected one pushed filter, got {filters:?}"
+        );
         let only = &filters[0];
         assert_eq!(only.column, "sensor");
         assert_eq!(only.operator.as_str(), "IN");
@@ -1572,19 +1577,14 @@ sources:
             .register_provider(
                 "app.customers",
                 Arc::new(
-                    dbfy_provider_static::StaticRecordBatchProvider::new(
-                        schema,
-                        vec![batch],
-                    )
-                    .with_capabilities(
-                        dbfy_provider::ProviderCapabilities {
+                    dbfy_provider_static::StaticRecordBatchProvider::new(schema, vec![batch])
+                        .with_capabilities(dbfy_provider::ProviderCapabilities {
                             projection_pushdown: true,
                             filter_pushdown: filter_capabilities,
                             limit_pushdown: true,
                             order_by_pushdown: false,
                             aggregate_pushdown: false,
-                        },
-                    ),
+                        }),
                 ),
             )
             .expect("provider should register");
@@ -1922,10 +1922,7 @@ sources:
         let engine = Engine::from_config(config).expect("engine builds");
 
         // Sanity: the table is registered under the qualified name.
-        assert!(engine
-            .registered_tables()
-            .iter()
-            .any(|t| t == "app.events"));
+        assert!(engine.registered_tables().iter().any(|t| t == "app.events"));
 
         let batches = engine
             .query("SELECT id FROM app.events WHERE level = 'ERROR' ORDER BY id")

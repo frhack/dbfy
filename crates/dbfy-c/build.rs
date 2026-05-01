@@ -6,8 +6,8 @@ fn main() {
     let include_dir = crate_dir.join("include");
     std::fs::create_dir_all(&include_dir).expect("create include dir");
 
-    let config = cbindgen::Config::from_file(crate_dir.join("cbindgen.toml"))
-        .expect("read cbindgen.toml");
+    let config =
+        cbindgen::Config::from_file(crate_dir.join("cbindgen.toml")).expect("read cbindgen.toml");
 
     cbindgen::Builder::new()
         .with_crate(crate_dir.to_string_lossy().to_string())

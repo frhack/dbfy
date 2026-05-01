@@ -73,7 +73,10 @@ fn days_to_civil(z: i64) -> (i32, u32, u32) {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = TempDir::new()?;
     let path = dir.path().join("app.jsonl");
-    println!("synthesising fixture: {} rows of structured logs", TOTAL_ROWS);
+    println!(
+        "synthesising fixture: {} rows of structured logs",
+        TOTAL_ROWS
+    );
     let t0 = std::time::Instant::now();
     build_fixture(&path);
     let bytes = std::fs::metadata(&path)?.len();
@@ -85,12 +88,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     let parser = Arc::new(JsonlParser::try_new(vec![
-        JsonlColumn { name: "id".into(),       path: "$.id".into(),       data_type: JsonlType::Int64 },
-        JsonlColumn { name: "ts".into(),       path: "$.ts".into(),       data_type: JsonlType::Timestamp },
-        JsonlColumn { name: "level".into(),    path: "$.level".into(),    data_type: JsonlType::String },
-        JsonlColumn { name: "service".into(),  path: "$.service".into(),  data_type: JsonlType::String },
-        JsonlColumn { name: "trace_id".into(), path: "$.trace_id".into(), data_type: JsonlType::String },
-        JsonlColumn { name: "msg".into(),      path: "$.msg".into(),      data_type: JsonlType::String },
+        JsonlColumn {
+            name: "id".into(),
+            path: "$.id".into(),
+            data_type: JsonlType::Int64,
+        },
+        JsonlColumn {
+            name: "ts".into(),
+            path: "$.ts".into(),
+            data_type: JsonlType::Timestamp,
+        },
+        JsonlColumn {
+            name: "level".into(),
+            path: "$.level".into(),
+            data_type: JsonlType::String,
+        },
+        JsonlColumn {
+            name: "service".into(),
+            path: "$.service".into(),
+            data_type: JsonlType::String,
+        },
+        JsonlColumn {
+            name: "trace_id".into(),
+            path: "$.trace_id".into(),
+            data_type: JsonlType::String,
+        },
+        JsonlColumn {
+            name: "msg".into(),
+            path: "$.msg".into(),
+            data_type: JsonlType::String,
+        },
     ])?);
 
     let table = Arc::new(
@@ -98,11 +125,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             path,
             parser,
             vec![
-                IndexedColumn { name: "id".into(),       kind: IndexKind::ZoneMap },
-                IndexedColumn { name: "ts".into(),       kind: IndexKind::ZoneMap },
-                IndexedColumn { name: "level".into(),    kind: IndexKind::Bloom },
-                IndexedColumn { name: "service".into(),  kind: IndexKind::Bloom },
-                IndexedColumn { name: "trace_id".into(), kind: IndexKind::Bloom },
+                IndexedColumn {
+                    name: "id".into(),
+                    kind: IndexKind::ZoneMap,
+                },
+                IndexedColumn {
+                    name: "ts".into(),
+                    kind: IndexKind::ZoneMap,
+                },
+                IndexedColumn {
+                    name: "level".into(),
+                    kind: IndexKind::Bloom,
+                },
+                IndexedColumn {
+                    name: "service".into(),
+                    kind: IndexKind::Bloom,
+                },
+                IndexedColumn {
+                    name: "trace_id".into(),
+                    kind: IndexKind::Bloom,
+                },
             ],
         )
         .with_chunk_rows(CHUNK_ROWS),
@@ -118,8 +160,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         &table,
         "1) range on id (1% of rows)",
         vec![
-            SimpleFilter { column: "id".into(),  operator: FilterOperator::Gte, value: ScalarValue::Int64(20_000) },
-            SimpleFilter { column: "id".into(),  operator: FilterOperator::Lt,  value: ScalarValue::Int64(20_500) },
+            SimpleFilter {
+                column: "id".into(),
+                operator: FilterOperator::Gte,
+                value: ScalarValue::Int64(20_000),
+            },
+            SimpleFilter {
+                column: "id".into(),
+                operator: FilterOperator::Lt,
+                value: ScalarValue::Int64(20_500),
+            },
         ],
     )
     .await?;
@@ -191,9 +241,7 @@ async fn bench(
         100.0 * (1.0 - kept_chunks as f64 / total_chunks as f64)
     };
     println!("{label}");
-    println!(
-        "  chunks scanned: {kept_chunks}/{total_chunks} ({skipped_pct:.1}% skipped)"
-    );
+    println!("  chunks scanned: {kept_chunks}/{total_chunks} ({skipped_pct:.1}% skipped)");
     println!("  rows returned:  {rows}");
     println!("  elapsed:        {elapsed:?}");
     println!();

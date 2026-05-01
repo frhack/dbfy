@@ -3,17 +3,17 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use arrow_pyarrow::{FromPyArrow, IntoPyArrow};
 use async_trait::async_trait;
+use dbfy_config::Config;
+use dbfy_frontend_datafusion::Engine as CoreEngine;
+use dbfy_provider::{
+    DynProvider, FilterCapabilities, ProgrammaticTableProvider, ProviderCapabilities,
+    ProviderError, ProviderResult, ScalarValue, ScanRequest, ScanResponse,
+};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyIterator, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
-use dbfy_config::Config;
-use dbfy_frontend_datafusion::Engine as CoreEngine;
-use dbfy_provider::{
-    DynProvider, FilterCapabilities, ProgrammaticTableProvider, ProviderCapabilities, ProviderError,
-    ProviderResult, ScalarValue, ScanRequest, ScanResponse,
-};
 use tokio::runtime::Runtime;
 
 create_exception!(_dbfy, DbfyError, PyRuntimeError);
@@ -124,16 +124,11 @@ impl PyEngine {
 
     fn explain_async<'py>(&self, py: Python<'py>, sql: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        future_into_py(py, async move {
-            inner.explain(&sql).await.map_err(to_py)
-        })
+        future_into_py(py, async move { inner.explain(&sql).await.map_err(to_py) })
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "Engine(tables={})",
-            self.inner.registered_tables().len()
-        )
+        format!("Engine(tables={})", self.inner.registered_tables().len())
     }
 }
 
@@ -191,10 +186,7 @@ impl ProgrammaticTableProvider for PyProgrammaticProvider {
     }
 }
 
-fn build_request_dict<'py>(
-    py: Python<'py>,
-    request: &ScanRequest,
-) -> PyResult<Bound<'py, PyDict>> {
+fn build_request_dict<'py>(py: Python<'py>, request: &ScanRequest) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("query_id", &request.query_id)?;
     dict.set_item("projection", request.projection.clone())?;
@@ -225,9 +217,9 @@ fn parse_capabilities(caps: &Bound<PyAny>) -> PyResult<ProviderCapabilities> {
     if caps.is_none() {
         return Ok(ProviderCapabilities::default());
     }
-    let dict = caps.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("provider.capabilities() must return a dict or None")
-    })?;
+    let dict = caps
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("provider.capabilities() must return a dict or None"))?;
 
     let mut out = ProviderCapabilities::default();
 

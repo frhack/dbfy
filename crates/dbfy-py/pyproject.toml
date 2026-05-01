@@ -23,7 +23,10 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/example/dbfy"
+Homepage = "https://github.com/frhack/dbfy"
+Repository = "https://github.com/frhack/dbfy"
+Issues = "https://github.com/frhack/dbfy/issues"
+Documentation = "https://github.com/frhack/dbfy/blob/main/docs/quickstart.md"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

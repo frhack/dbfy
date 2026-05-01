@@ -359,8 +359,7 @@ impl ParserConfig {
                 }
             }
             Self::Csv { columns, .. } => {
-                let v: Vec<(String, &str)> =
-                    columns.iter().map(|c| (c.name.clone(), "")).collect();
+                let v: Vec<(String, &str)> = columns.iter().map(|c| (c.name.clone(), "")).collect();
                 check_named(&v, "csv")?;
             }
             Self::Logfmt { columns } => {
@@ -383,8 +382,7 @@ impl ParserConfig {
                 check_named(&v, "regex")?;
             }
             Self::Syslog { columns } => {
-                let v: Vec<(String, &str)> =
-                    columns.iter().map(|c| (c.name.clone(), "")).collect();
+                let v: Vec<(String, &str)> = columns.iter().map(|c| (c.name.clone(), "")).collect();
                 check_named(&v, "syslog")?;
             }
         }

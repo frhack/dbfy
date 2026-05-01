@@ -45,14 +45,13 @@ const ROOT_CANDIDATES: &[&str] = &[
     "$.items[*]",
     "$.records[*]",
     "$.rows[*]",
-    "$.value[*]",   // OData
+    "$.value[*]", // OData
     "$.payload[*]",
     "$",
 ];
 
 pub async fn probe(url: String, opts: ProbeOpts) -> Result<String> {
-    let parsed = reqwest::Url::parse(&url)
-        .with_context(|| format!("invalid URL `{url}`"))?;
+    let parsed = reqwest::Url::parse(&url).with_context(|| format!("invalid URL `{url}`"))?;
 
     let base_url = format!(
         "{}://{}{}",
@@ -60,22 +59,18 @@ pub async fn probe(url: String, opts: ProbeOpts) -> Result<String> {
         parsed.host_str().unwrap_or(""),
         parsed.port().map(|p| format!(":{p}")).unwrap_or_default(),
     );
-    let endpoint_path = opts
-        .endpoint_path
-        .clone()
-        .unwrap_or_else(|| {
-            let p = parsed.path().to_string();
-            if p.is_empty() { "/".to_string() } else { p }
-        });
+    let endpoint_path = opts.endpoint_path.clone().unwrap_or_else(|| {
+        let p = parsed.path().to_string();
+        if p.is_empty() { "/".to_string() } else { p }
+    });
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(opts.timeout_seconds))
         .build()?;
     let mut req = client.get(parsed.clone());
     if let Some(env_var) = &opts.auth_bearer_env {
-        let token = std::env::var(env_var).with_context(|| {
-            format!("environment variable `{env_var}` is not set")
-        })?;
+        let token = std::env::var(env_var)
+            .with_context(|| format!("environment variable `{env_var}` is not set"))?;
         req = req.bearer_auth(token);
     }
     let response = req.send().await.context("HTTP request failed")?;
@@ -210,7 +205,13 @@ fn looks_like_rfc3339(s: &str) -> bool {
 
 fn sanitize(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -310,8 +311,10 @@ mod tests {
             "tags": ["a", "b"],
         });
         let cols = infer_columns(&sample);
-        let by_name: std::collections::HashMap<_, _> =
-            cols.iter().map(|c| (c.name.as_str(), c.yaml_type)).collect();
+        let by_name: std::collections::HashMap<_, _> = cols
+            .iter()
+            .map(|c| (c.name.as_str(), c.yaml_type))
+            .collect();
         assert_eq!(by_name["id"], "int64");
         assert_eq!(by_name["score"], "float64");
         assert_eq!(by_name["name"], "string");

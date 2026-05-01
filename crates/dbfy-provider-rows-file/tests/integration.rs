@@ -7,8 +7,8 @@ use std::sync::Arc;
 use dbfy_provider::{
     FilterOperator, ProgrammaticTableProvider, ScalarValue, ScanRequest, SimpleFilter,
 };
-use dbfy_provider_rows_file::parsers::{JsonlColumn, JsonlParser};
 use dbfy_provider_rows_file::parsers::jsonl::JsonlType;
+use dbfy_provider_rows_file::parsers::{JsonlColumn, JsonlParser};
 use dbfy_provider_rows_file::{IndexKind, IndexedColumn, RowsFileTable};
 use futures::StreamExt;
 use tempfile::TempDir;
@@ -199,7 +199,10 @@ async fn jsonl_zone_map_actually_skips_chunks() {
         },
     ];
     let (total, kept) = table.debug_skip_stats(&filters).unwrap();
-    assert_eq!(total, 20, "expected 20 chunks for 10k rows / 500 chunk_rows");
+    assert_eq!(
+        total, 20,
+        "expected 20 chunks for 10k rows / 500 chunk_rows"
+    );
     // The matching range is entirely inside one chunk (5000..5500). Pruner
     // should keep exactly 1.
     assert_eq!(

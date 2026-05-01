@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use dbfy_config::{
-    AuthConfig, ColumnConfig, Config, IndexedColumnConfig, ParserConfig, PaginationConfig,
+    AuthConfig, ColumnConfig, Config, IndexedColumnConfig, PaginationConfig, ParserConfig,
     PushdownConfig, RestSourceConfig, RestTableConfig, RowsFileTableConfig, SourceConfig,
 };
 use serde::Serialize;
@@ -85,13 +85,14 @@ fn emit_rest_views(
     schema: &str,
     create_kw: &str,
 ) -> Result<()> {
-    out.push_str(&format!("-- source `{source_name}` (REST {})\n", rest.base_url));
+    out.push_str(&format!(
+        "-- source `{source_name}` (REST {})\n",
+        rest.base_url
+    ));
     for (table_name, table_cfg) in &rest.tables {
         let url = join_url(&rest.base_url, &table_cfg.endpoint.path);
-        let yaml = serde_yaml::to_string(&RestTableExtensionConfig::from_parts(
-            rest, table_cfg,
-        ))
-        .context("serialising per-table REST config")?;
+        let yaml = serde_yaml::to_string(&RestTableExtensionConfig::from_parts(rest, table_cfg))
+            .context("serialising per-table REST config")?;
         out.push_str(&format!(
             "{create_kw} \"{schema}\".\"{table}\" AS\n  SELECT * FROM dbfy_rest(\n    '{url}',\n    config := '{cfg}'\n  );\n\n",
             schema = sql_ident_escape(schema),
@@ -352,7 +353,10 @@ mod tests {
             }),
         );
         let sql = emit_attach_sql(&config, &AttachOpts::default()).unwrap();
-        assert!(sql.contains("'http://example.com/items?q=O''Brien'"), "{sql}");
+        assert!(
+            sql.contains("'http://example.com/items?q=O''Brien'"),
+            "{sql}"
+        );
     }
 
     #[test]

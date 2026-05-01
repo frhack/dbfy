@@ -6,12 +6,12 @@ use arrow_array::builder::{Int64Builder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
-use futures::stream;
 use dbfy_frontend_datafusion::Engine;
 use dbfy_provider::{
     FilterCapabilities, FilterOperator, ProgrammaticTableProvider, ProviderCapabilities,
     ProviderError, ProviderResult, ScalarValue, ScanRequest, ScanResponse, SimpleFilter,
 };
+use futures::stream;
 
 const DEFAULT_BATCH_SIZE: usize = 1024;
 

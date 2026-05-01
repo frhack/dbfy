@@ -8,7 +8,7 @@ use arrow_schema::DataType as ArrowDataType;
 use memchr::memchr_iter;
 
 use crate::bloom::Bloom;
-use crate::index::{Chunk, ColumnStats, Index, ZoneRange, INDEXER_VERSION};
+use crate::index::{Chunk, ColumnStats, INDEXER_VERSION, Index, ZoneRange};
 use crate::invalidation::FileSnapshot;
 use crate::parser::{LineParser, ParseError, ParseResult};
 
@@ -186,11 +186,7 @@ fn hash_schema(schema: &arrow_schema::Schema) -> u64 {
     hasher.finish()
 }
 
-fn stats_for_array(
-    arr: &dyn Array,
-    kind: IndexKind,
-    row_count: usize,
-) -> ParseResult<ColumnStats> {
+fn stats_for_array(arr: &dyn Array, kind: IndexKind, row_count: usize) -> ParseResult<ColumnStats> {
     if kind == IndexKind::None {
         return Ok(ColumnStats::None);
     }

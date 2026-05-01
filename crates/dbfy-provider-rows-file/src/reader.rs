@@ -8,11 +8,7 @@ use arrow_array::RecordBatch;
 use crate::index::Chunk;
 use crate::parser::{LineParser, ParseError, ParseResult};
 
-pub fn read_chunk(
-    file: &Path,
-    chunk: &Chunk,
-    parser: &dyn LineParser,
-) -> ParseResult<RecordBatch> {
+pub fn read_chunk(file: &Path, chunk: &Chunk, parser: &dyn LineParser) -> ParseResult<RecordBatch> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(file)?;
     let len = (chunk.byte_end - chunk.byte_start) as usize;

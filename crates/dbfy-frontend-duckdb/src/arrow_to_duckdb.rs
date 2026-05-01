@@ -32,8 +32,8 @@ pub fn arrow_data_type_to_duckdb(t: &DataType) -> LogicalTypeHandle {
 }
 
 pub fn cell_type_to_duckdb(t: dbfy_config::CellTypeConfig) -> LogicalTypeHandle {
-    use dbfy_config::CellTypeConfig as C;
     use LogicalTypeId as L;
+    use dbfy_config::CellTypeConfig as C;
     LogicalTypeHandle::from(match t {
         C::Int64 => L::Bigint,
         C::Float64 => L::Double,
@@ -145,9 +145,7 @@ pub fn write_arrow_column(
             }
         }
         other => {
-            return Err(
-                format!("dbfy: arrow type `{other}` is not yet writable to DuckDB").into(),
-            );
+            return Err(format!("dbfy: arrow type `{other}` is not yet writable to DuckDB").into());
         }
     }
     Ok(())

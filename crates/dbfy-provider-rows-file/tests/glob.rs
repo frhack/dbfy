@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use dbfy_provider::{ProgrammaticTableProvider, ScanRequest};
 use dbfy_provider_rows_file::parsers::JsonlColumn;
-use dbfy_provider_rows_file::parsers::jsonl::JsonlType;
 use dbfy_provider_rows_file::parsers::JsonlParser;
+use dbfy_provider_rows_file::parsers::jsonl::JsonlType;
 use dbfy_provider_rows_file::{IndexKind, IndexedColumn, RowsFileGlob};
 use futures::StreamExt;
 use tempfile::TempDir;
@@ -15,7 +15,10 @@ use tempfile::TempDir;
 #[tokio::test]
 async fn glob_pattern_unions_files() {
     let dir = TempDir::new().unwrap();
-    for (i, name) in ["app-1.jsonl", "app-2.jsonl", "app-3.jsonl"].iter().enumerate() {
+    for (i, name) in ["app-1.jsonl", "app-2.jsonl", "app-3.jsonl"]
+        .iter()
+        .enumerate()
+    {
         let path = dir.path().join(name);
         let mut f = std::fs::File::create(&path).unwrap();
         for j in 0..100 {

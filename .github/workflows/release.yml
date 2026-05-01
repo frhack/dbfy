@@ -1,0 +1,108 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-cli:
+    name: CLI ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
+          - { runner: macos-13,       target: x86_64-apple-darwin }
+          - { runner: macos-14,       target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.target }}
+      - name: Build CLI
+        run: cargo build --release -p dbfy-cli --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/dbfy-cli dist/dbfy
+          tar -C dist -czf dbfy-cli-${{ matrix.target }}.tar.gz dbfy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbfy-cli-${{ matrix.target }}
+          path: dbfy-cli-${{ matrix.target }}.tar.gz
+
+  build-duckdb-extension:
+    name: extension ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,  target: x86_64-unknown-linux-gnu, lib: libdbfy_duckdb.so }
+          - { runner: macos-13,       target: x86_64-apple-darwin,     lib: libdbfy_duckdb.dylib }
+          - { runner: macos-14,       target: aarch64-apple-darwin,    lib: libdbfy_duckdb.dylib }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ext-${{ matrix.target }}
+          shared-key: duckdb-bundled
+      - name: Build loadable extension
+        run: |
+          cargo build -p dbfy-frontend-duckdb \
+            --features loadable_extension \
+            --release --jobs 1 \
+            --target ${{ matrix.target }}
+          strip target/${{ matrix.target }}/release/${{ matrix.lib }} || true
+      - name: Append metadata footer
+        run: |
+          python3 crates/dbfy-frontend-duckdb/scripts/append_metadata.py \
+            target/${{ matrix.target }}/release/${{ matrix.lib }} \
+            --output dbfy-${{ matrix.target }}.duckdb_extension \
+            --duckdb-capi-version v1.2.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbfy-extension-${{ matrix.target }}
+          path: dbfy-${{ matrix.target }}.duckdb_extension
+
+  release:
+    name: GitHub Release
+    needs: [build-cli, build-duckdb-extension]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.duckdb_extension' \) -exec cp {} release/ \;
+          ls -la release/
+      - name: Generate checksums
+        run: |
+          cd release
+          shasum -a 256 * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

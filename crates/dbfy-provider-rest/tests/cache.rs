@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dbfy_config::{
-    AuthConfig, CacheConfig, ColumnConfig, DataType, EndpointConfig, HttpMethod,
-    PaginationConfig, RestSourceConfig, RestTableConfig, RuntimeConfig,
+    AuthConfig, CacheConfig, ColumnConfig, DataType, EndpointConfig, HttpMethod, PaginationConfig,
+    RestSourceConfig, RestTableConfig, RuntimeConfig,
 };
 use dbfy_provider_rest::RestTable;
 use futures::StreamExt;

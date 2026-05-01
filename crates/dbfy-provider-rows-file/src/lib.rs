@@ -17,17 +17,19 @@ pub mod parsers;
 mod pruner;
 mod reader;
 
-pub use from_config::{build_handle, RowsFileHandle};
+pub use from_config::{RowsFileHandle, build_handle};
 
 pub use glob_table::RowsFileGlob;
 // Re-exported for downstream use (CLI prints, diagnostics).
 
 pub use bloom::Bloom;
-pub use index::{idx_path, read as read_index, Index};
-pub use invalidation::{decide as decide_invalidation, decide_with_path as decide_invalidation_with_path};
+pub use index::{Index, idx_path, read as read_index};
+pub use invalidation::{
+    decide as decide_invalidation, decide_with_path as decide_invalidation_with_path,
+};
 pub use parser::CellType;
 
-pub use indexer::{IndexKind, IndexedColumn, DEFAULT_CHUNK_ROWS};
+pub use indexer::{DEFAULT_CHUNK_ROWS, IndexKind, IndexedColumn};
 pub use invalidation::{Decision, FileSnapshot};
 pub use parser::{DynParser, LineParser, ParseError, ParseResult};
 
@@ -41,7 +43,6 @@ use dbfy_provider::{
     ProviderResult, ScanRequest, ScanResponse,
 };
 use futures::stream;
-
 
 /// `ProgrammaticTableProvider` implementation: persistent indexed scan with
 /// pushdown of equality and range filters on indexed columns.
@@ -120,36 +121,39 @@ impl RowsFileTable {
         // Decide against either the in-memory cache (if any) or the on-disk
         // sidecar. We can't trust the in-memory cache across an external
         // file mutation; the snapshot drives every choice.
-        let cached_for_decision: Option<index::Index> = guard.clone().or_else(|| index::read(&idx_path).ok());
+        let cached_for_decision: Option<index::Index> =
+            guard.clone().or_else(|| index::read(&idx_path).ok());
 
         let (chosen, decision) = match cached_for_decision {
-            Some(cached) => match invalidation::decide_with_path(&snapshot, &cached, Some(&self.file)) {
-                Decision::Reuse => (cached, RefreshDecision::Reused),
-                Decision::Extend => {
-                    let extended = indexer::extend(
-                        &self.file,
-                        self.parser.as_ref(),
-                        &self.indexed_columns,
-                        self.chunk_rows,
-                        cached,
-                    )
-                    .map_err(parse_to_provider)?;
-                    index::write(&idx_path, &extended).map_err(io_to_provider)?;
-                    (extended, RefreshDecision::Extended)
+            Some(cached) => {
+                match invalidation::decide_with_path(&snapshot, &cached, Some(&self.file)) {
+                    Decision::Reuse => (cached, RefreshDecision::Reused),
+                    Decision::Extend => {
+                        let extended = indexer::extend(
+                            &self.file,
+                            self.parser.as_ref(),
+                            &self.indexed_columns,
+                            self.chunk_rows,
+                            cached,
+                        )
+                        .map_err(parse_to_provider)?;
+                        index::write(&idx_path, &extended).map_err(io_to_provider)?;
+                        (extended, RefreshDecision::Extended)
+                    }
+                    Decision::Rebuild => {
+                        drop(cached);
+                        let fresh = indexer::build(
+                            &self.file,
+                            self.parser.as_ref(),
+                            &self.indexed_columns,
+                            self.chunk_rows,
+                        )
+                        .map_err(parse_to_provider)?;
+                        index::write(&idx_path, &fresh).map_err(io_to_provider)?;
+                        (fresh, RefreshDecision::Rebuilt)
+                    }
                 }
-                Decision::Rebuild => {
-                    drop(cached);
-                    let fresh = indexer::build(
-                        &self.file,
-                        self.parser.as_ref(),
-                        &self.indexed_columns,
-                        self.chunk_rows,
-                    )
-                    .map_err(parse_to_provider)?;
-                    index::write(&idx_path, &fresh).map_err(io_to_provider)?;
-                    (fresh, RefreshDecision::Rebuilt)
-                }
-            },
+            }
             None => {
                 let fresh = indexer::build(
                     &self.file,

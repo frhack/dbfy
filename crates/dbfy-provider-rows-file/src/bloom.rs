@@ -34,7 +34,11 @@ impl Bloom {
         let k = ((m as f64 / n) * 2.0_f64.ln()).round() as u8;
         let k = k.clamp(1, 16);
         let seeds: Vec<u64> = (0..k as u64)
-            .map(|i| 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(i + 1).wrapping_add(0xDEAD_BEEF))
+            .map(|i| {
+                0x9E37_79B9_7F4A_7C15u64
+                    .wrapping_mul(i + 1)
+                    .wrapping_add(0xDEAD_BEEF)
+            })
             .collect();
         Self {
             bits: vec![0u8; ((m + 7) / 8) as usize],

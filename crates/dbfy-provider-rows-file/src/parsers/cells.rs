@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
+use arrow_array::ArrayRef;
 use arrow_array::builder::{
     Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
 };
-use arrow_array::ArrayRef;
 
 use crate::parser::{CellType, ParseError, ParseResult};
 use crate::parsers::jsonl;
@@ -47,10 +47,12 @@ impl TypedBuilder {
                 Some(s) => b.append_value(s),
                 None => b.append_null(),
             },
-            TypedBuilder::Timestamp(b) => match raw.and_then(|s| jsonl::chrono_lite::parse_rfc3339_micros(s).ok()) {
-                Some(micros) => b.append_value(micros),
-                None => b.append_null(),
-            },
+            TypedBuilder::Timestamp(b) => {
+                match raw.and_then(|s| jsonl::chrono_lite::parse_rfc3339_micros(s).ok()) {
+                    Some(micros) => b.append_value(micros),
+                    None => b.append_null(),
+                }
+            }
         }
         Ok(())
     }

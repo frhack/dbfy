@@ -1,7 +1,12 @@
 //! Built-in parsers for `LineParser`. Each is gated behind a cargo feature
 //! so binary size scales with the formats actually needed.
 
-#[cfg(any(feature = "regex", feature = "logfmt", feature = "csv", feature = "syslog"))]
+#[cfg(any(
+    feature = "regex",
+    feature = "logfmt",
+    feature = "csv",
+    feature = "syslog"
+))]
 mod cells;
 
 #[cfg(feature = "jsonl")]

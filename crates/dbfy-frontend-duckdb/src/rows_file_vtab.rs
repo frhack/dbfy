@@ -38,11 +38,9 @@ use std::ffi::c_void;
 use std::sync::Mutex;
 
 use arrow_array::RecordBatch;
-use dbfy_config::{
-    IndexedColumnConfig, ParserConfig, RowsFileTableConfig,
-};
+use dbfy_config::{IndexedColumnConfig, ParserConfig, RowsFileTableConfig};
 use dbfy_provider::{FilterOperator, ProgrammaticTableProvider, ScalarValue, SimpleFilter};
-use dbfy_provider_rows_file::{build_handle, RowsFileHandle};
+use dbfy_provider_rows_file::{RowsFileHandle, build_handle};
 use duckdb::Connection;
 use duckdb::core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId};
 use duckdb::vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab};
@@ -135,17 +133,16 @@ impl VTab for RowsFileVTab {
         // map cleanly onto our typed FilterOperator + ScalarValue are
         // dropped here; DuckDB's filter operator above the LogicalGet
         // still applies them, so the only cost is missed pruning.
-        let pushed_filters: Vec<SimpleFilter> = unsafe {
-            crate::shim::take_pushdown_filters(bind_ptr as *mut c_void)
-        }
-        .map_err(|err| Box::<dyn StdError>::from(format!("invalid pushdown JSON: {err}")))?
-        .map(|filters| {
-            filters
-                .into_iter()
-                .filter_map(pushdown_to_typed_filter)
-                .collect()
-        })
-        .unwrap_or_default();
+        let pushed_filters: Vec<SimpleFilter> =
+            unsafe { crate::shim::take_pushdown_filters(bind_ptr as *mut c_void) }
+                .map_err(|err| Box::<dyn StdError>::from(format!("invalid pushdown JSON: {err}")))?
+                .map(|filters| {
+                    filters
+                        .into_iter()
+                        .filter_map(pushdown_to_typed_filter)
+                        .collect()
+                })
+                .unwrap_or_default();
 
         // Compose `RowsFileTableConfig`: positional arg → path or glob,
         // inline YAML → parser + indexed_columns + chunk_rows.
@@ -164,9 +161,7 @@ impl VTab for RowsFileVTab {
             let mut all = Vec::new();
             let mut s = response;
             while let Some(batch) = s.next().await {
-                all.push(
-                    batch.map_err(|err| Box::<dyn StdError>::from(err.to_string()))?,
-                );
+                all.push(batch.map_err(|err| Box::<dyn StdError>::from(err.to_string()))?);
             }
             Ok::<_, Box<dyn StdError>>(all)
         })?;
@@ -220,26 +215,21 @@ impl VTab for RowsFileVTab {
 
 fn declared_columns(parser: &ParserConfig) -> Vec<(String, dbfy_config::CellTypeConfig)> {
     match parser {
-        ParserConfig::Jsonl { columns } => columns
-            .iter()
-            .map(|c| (c.name.clone(), c.r#type))
-            .collect(),
-        ParserConfig::Csv { columns, .. } => columns
-            .iter()
-            .map(|c| (c.name.clone(), c.r#type))
-            .collect(),
-        ParserConfig::Logfmt { columns } => columns
-            .iter()
-            .map(|c| (c.name.clone(), c.r#type))
-            .collect(),
-        ParserConfig::Regex { columns, .. } => columns
-            .iter()
-            .map(|c| (c.name.clone(), c.r#type))
-            .collect(),
-        ParserConfig::Syslog { columns } => columns
-            .iter()
-            .map(|c| (c.name.clone(), c.r#type))
-            .collect(),
+        ParserConfig::Jsonl { columns } => {
+            columns.iter().map(|c| (c.name.clone(), c.r#type)).collect()
+        }
+        ParserConfig::Csv { columns, .. } => {
+            columns.iter().map(|c| (c.name.clone(), c.r#type)).collect()
+        }
+        ParserConfig::Logfmt { columns } => {
+            columns.iter().map(|c| (c.name.clone(), c.r#type)).collect()
+        }
+        ParserConfig::Regex { columns, .. } => {
+            columns.iter().map(|c| (c.name.clone(), c.r#type)).collect()
+        }
+        ParserConfig::Syslog { columns } => {
+            columns.iter().map(|c| (c.name.clone(), c.r#type)).collect()
+        }
     }
 }
 
@@ -248,8 +238,16 @@ fn compose_table_config(target: &str, ext: &ExtensionConfig) -> RowsFileTableCon
     // else as a single file path.
     let is_glob = target.chars().any(|c| matches!(c, '*' | '?' | '['));
     RowsFileTableConfig {
-        path: if is_glob { None } else { Some(target.to_string()) },
-        glob: if is_glob { Some(target.to_string()) } else { None },
+        path: if is_glob {
+            None
+        } else {
+            Some(target.to_string())
+        },
+        glob: if is_glob {
+            Some(target.to_string())
+        } else {
+            None
+        },
         parser: ext.parser.clone(),
         indexed_columns: ext.indexed_columns.clone(),
         chunk_rows: ext.chunk_rows,

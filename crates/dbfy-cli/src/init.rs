@@ -48,10 +48,17 @@ pub async fn init(opts: InitOpts) -> Result<String> {
         None => {
             let idx = Select::with_theme(&theme)
                 .with_prompt("Source kind")
-                .items(&["REST endpoint (HTTP/JSON)", "rows-file (jsonl/csv/syslog/logfmt)"])
+                .items(&[
+                    "REST endpoint (HTTP/JSON)",
+                    "rows-file (jsonl/csv/syslog/logfmt)",
+                ])
                 .default(0)
                 .interact()?;
-            if idx == 0 { SourceKind::Rest } else { SourceKind::RowsFile }
+            if idx == 0 {
+                SourceKind::Rest
+            } else {
+                SourceKind::RowsFile
+            }
         }
     };
 

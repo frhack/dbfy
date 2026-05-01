@@ -85,7 +85,9 @@ mod shim {
     pub fn duckdb_version() -> &'static str {
         unsafe {
             let p = dbfy_shim_duckdb_version();
-            CStr::from_ptr(p).to_str().expect("duckdb version is valid utf-8")
+            CStr::from_ptr(p)
+                .to_str()
+                .expect("duckdb version is valid utf-8")
         }
     }
 
@@ -148,8 +150,9 @@ mod shim {
 
 #[cfg(all(feature = "duckdb", not(feature = "loadable_extension")))]
 pub use shim::{
-    drain_observations as shim_drain_observations, duckdb_version as shim_duckdb_version,
-    install_optimizer_hook, probe as shim_probe, take_pushdown_filters, PushdownFilter,
+    PushdownFilter, drain_observations as shim_drain_observations,
+    duckdb_version as shim_duckdb_version, install_optimizer_hook, probe as shim_probe,
+    take_pushdown_filters,
 };
 
 #[cfg(any(feature = "duckdb", feature = "loadable_extension"))]

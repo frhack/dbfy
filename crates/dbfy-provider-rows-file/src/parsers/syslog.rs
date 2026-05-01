@@ -230,12 +230,36 @@ mod tests {
     #[test]
     fn parses_canonical_5424() {
         let parser = SyslogParser::try_new(vec![
-            SyslogColumn { name: "pri".into(),    field: SyslogField::Priority,  data_type: CellType::Int64 },
-            SyslogColumn { name: "host".into(),   field: SyslogField::Hostname,  data_type: CellType::String },
-            SyslogColumn { name: "app".into(),    field: SyslogField::AppName,   data_type: CellType::String },
-            SyslogColumn { name: "msgid".into(),  field: SyslogField::MsgId,     data_type: CellType::String },
-            SyslogColumn { name: "sd".into(),     field: SyslogField::StructuredData, data_type: CellType::String },
-            SyslogColumn { name: "msg".into(),    field: SyslogField::Message,   data_type: CellType::String },
+            SyslogColumn {
+                name: "pri".into(),
+                field: SyslogField::Priority,
+                data_type: CellType::Int64,
+            },
+            SyslogColumn {
+                name: "host".into(),
+                field: SyslogField::Hostname,
+                data_type: CellType::String,
+            },
+            SyslogColumn {
+                name: "app".into(),
+                field: SyslogField::AppName,
+                data_type: CellType::String,
+            },
+            SyslogColumn {
+                name: "msgid".into(),
+                field: SyslogField::MsgId,
+                data_type: CellType::String,
+            },
+            SyslogColumn {
+                name: "sd".into(),
+                field: SyslogField::StructuredData,
+                data_type: CellType::String,
+            },
+            SyslogColumn {
+                name: "msg".into(),
+                field: SyslogField::Message,
+                data_type: CellType::String,
+            },
         ])
         .unwrap();
         // Build the line as bytes so we can include the real UTF-8 BOM
@@ -288,9 +312,21 @@ mod tests {
     #[test]
     fn nil_dashes_become_null() {
         let parser = SyslogParser::try_new(vec![
-            SyslogColumn { name: "host".into(), field: SyslogField::Hostname,  data_type: CellType::String },
-            SyslogColumn { name: "app".into(),  field: SyslogField::AppName,   data_type: CellType::String },
-            SyslogColumn { name: "proc".into(), field: SyslogField::ProcId,    data_type: CellType::String },
+            SyslogColumn {
+                name: "host".into(),
+                field: SyslogField::Hostname,
+                data_type: CellType::String,
+            },
+            SyslogColumn {
+                name: "app".into(),
+                field: SyslogField::AppName,
+                data_type: CellType::String,
+            },
+            SyslogColumn {
+                name: "proc".into(),
+                field: SyslogField::ProcId,
+                data_type: CellType::String,
+            },
         ])
         .unwrap();
         let bytes = b"<13>1 - - - - - - just a message\n";
@@ -307,8 +343,16 @@ mod tests {
     #[test]
     fn facility_severity_split_from_priority() {
         let parser = SyslogParser::try_new(vec![
-            SyslogColumn { name: "fac".into(), field: SyslogField::Facility, data_type: CellType::Int64 },
-            SyslogColumn { name: "sev".into(), field: SyslogField::Severity, data_type: CellType::Int64 },
+            SyslogColumn {
+                name: "fac".into(),
+                field: SyslogField::Facility,
+                data_type: CellType::Int64,
+            },
+            SyslogColumn {
+                name: "sev".into(),
+                field: SyslogField::Severity,
+                data_type: CellType::Int64,
+            },
         ])
         .unwrap();
         // PRI=165 -> facility=20, severity=5

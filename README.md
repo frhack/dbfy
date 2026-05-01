@@ -1,5 +1,10 @@
 # dbfy
 
+[![tests](https://github.com/frhack/dbfy/actions/workflows/test.yml/badge.svg)](https://github.com/frhack/dbfy/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/frhack/dbfy?include_prereleases)](https://github.com/frhack/dbfy/releases)
+[![pypi](https://img.shields.io/pypi/v/dbfy.svg)](https://pypi.org/project/dbfy/)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **Embedded SQL federation engine.** Bring REST APIs and line-delimited log
 files (jsonl, csv, logfmt, syslog, regex) to the same SQL surface as your
 Parquet, CSV, and in-memory data — no glue scripts, no `pd.merge`.
@@ -16,6 +21,26 @@ SELECT s.zone, count(*) AS hot_acked
 ```
 
 → **[Quickstart](docs/quickstart.md)** — five minutes, zero to your first SQL query.
+
+## Install
+
+**Python**:
+```bash
+pip install dbfy
+```
+
+**CLI binary** (Linux x86_64, macOS x86_64/arm64) — download from [Releases](https://github.com/frhack/dbfy/releases) and add to `PATH`.
+
+**DuckDB extension** — also on the Releases page (`dbfy-<target>.duckdb_extension`); load with:
+```sql
+LOAD 'path/to/dbfy.duckdb_extension';
+```
+
+**From source** (Rust 1.85+):
+```bash
+git clone https://github.com/frhack/dbfy && cd dbfy
+cargo build --release -p dbfy-cli
+```
 
 ## What it does
 

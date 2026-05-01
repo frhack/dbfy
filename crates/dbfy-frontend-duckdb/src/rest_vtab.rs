@@ -111,9 +111,7 @@ impl VTab for RestVTab {
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn StdError>> {
         let url_param = bind.get_parameter(0).to_string();
-        let config_yaml = bind
-            .get_named_parameter("config")
-            .map(|v| v.to_string());
+        let config_yaml = bind.get_named_parameter("config").map(|v| v.to_string());
 
         let config = match config_yaml {
             Some(yaml) if !yaml.trim().is_empty() => serde_yaml::from_str::<ExtensionConfig>(&yaml)
@@ -130,10 +128,7 @@ impl VTab for RestVTab {
         let host = parsed
             .host_str()
             .ok_or_else(|| "dbfy_rest URL must include a host".to_string())?;
-        let port = parsed
-            .port()
-            .map(|p| format!(":{p}"))
-            .unwrap_or_default();
+        let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
         let base_url = format!("{scheme}://{host}{port}");
         let path = parsed.path().to_string();
 
@@ -173,21 +168,20 @@ impl VTab for RestVTab {
         // take here drains them. `None` means no pushdown opportunity
         // was recognised; we still scan, just without any pushed
         // predicates.
-        let pushed_filters: Vec<RestSimpleFilter> = unsafe {
-            crate::shim::take_pushdown_filters(bind_ptr as *mut c_void)
-        }
-        .map_err(|err| Box::<dyn StdError>::from(format!("invalid pushdown JSON: {err}")))?
-        .map(|filters| {
-            filters
-                .into_iter()
-                .map(|f| RestSimpleFilter {
-                    column: f.column,
-                    operator: f.op,
-                    value: f.value,
+        let pushed_filters: Vec<RestSimpleFilter> =
+            unsafe { crate::shim::take_pushdown_filters(bind_ptr as *mut c_void) }
+                .map_err(|err| Box::<dyn StdError>::from(format!("invalid pushdown JSON: {err}")))?
+                .map(|filters| {
+                    filters
+                        .into_iter()
+                        .map(|f| RestSimpleFilter {
+                            column: f.column,
+                            operator: f.op,
+                            value: f.value,
+                        })
+                        .collect()
                 })
-                .collect()
-        })
-        .unwrap_or_default();
+                .unwrap_or_default();
 
         let table_config = RestTableConfig {
             endpoint: EndpointConfig {
@@ -222,9 +216,7 @@ impl VTab for RestVTab {
             let mut all = Vec::new();
             let mut chunks = stream.stream;
             while let Some(batch_result) = chunks.next().await {
-                all.push(
-                    batch_result.map_err(|err| Box::<dyn StdError>::from(err.to_string()))?,
-                );
+                all.push(batch_result.map_err(|err| Box::<dyn StdError>::from(err.to_string()))?);
             }
             Ok::<_, Box<dyn StdError>>(all)
         })?;

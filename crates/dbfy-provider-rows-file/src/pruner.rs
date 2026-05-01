@@ -9,11 +9,7 @@ use dbfy_provider::{FilterOperator, ScalarValue, SimpleFilter};
 use crate::index::{Chunk, ColumnStats, Index};
 
 /// Returns references to the chunks of `index` that survive the filter set.
-pub fn prune<'a>(
-    index: &'a Index,
-    schema: &Schema,
-    filters: &[SimpleFilter],
-) -> Vec<&'a Chunk> {
+pub fn prune<'a>(index: &'a Index, schema: &Schema, filters: &[SimpleFilter]) -> Vec<&'a Chunk> {
     if filters.is_empty() {
         return index.chunks.iter().collect();
     }
@@ -25,7 +21,11 @@ pub fn prune<'a>(
 }
 
 fn chunk_passes(chunk: &Chunk, schema: &Schema, filter: &SimpleFilter) -> bool {
-    let Some(col_idx) = schema.fields().iter().position(|f| *f.name() == filter.column) else {
+    let Some(col_idx) = schema
+        .fields()
+        .iter()
+        .position(|f| *f.name() == filter.column)
+    else {
         return true; // unknown column — be conservative.
     };
     let Some(stats) = chunk.stats.get(col_idx) else {
@@ -175,4 +175,3 @@ fn stats_match_range_str(min: &str, max: &str, v: &str, op: FilterOperator) -> b
         FilterOperator::In => true,
     }
 }
-
