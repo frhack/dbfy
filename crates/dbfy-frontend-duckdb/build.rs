@@ -6,20 +6,22 @@
 //! * `--features loadable_extension` → no-op. The loadable extension uses
 //!   only the C API and cannot link a C++ shim alongside the host DuckDB.
 //! * `--features duckdb` (bundled) → compile `cpp/extension_shim.cpp`
-//!   against the headers `libduckdb-sys` extracted under
-//!   `target/<profile>/build/libduckdb-sys-<hash>/out/duckdb/src/include`,
-//!   and link the resulting object into the consumer rlib.
+//!   against `libduckdb-sys`'s extracted DuckDB headers and link the
+//!   resulting object into the consumer rlib.
 //!
-//! Caveat — header discovery hack. `libduckdb-sys` does not currently
-//! emit `cargo:include=...` (it lacks a `links = "duckdb"` directive in
-//! its Cargo.toml). Until that lands upstream, downstream crates that
-//! want the C++ headers have to glob the target tree to locate the
-//! extracted `out/duckdb/src/include` directory. A proper fix is a PR
-//! against `duckdb-rs` adding `links` + `cargo:include=$OUT_DIR/duckdb/src/include`.
+//! Header discovery: when `DEP_DUCKDB_INCLUDE` is published by
+//! `libduckdb-sys` (after <https://github.com/duckdb/duckdb-rs/pull/753>
+//! lands and ships) we read it directly. Until then, `libduckdb-sys`
+//! does not export its include path to downstream build scripts, so
+//! we fall back to globbing
+//! `target/<profile>/build/libduckdb-sys-<hash>/out/duckdb/src/include`.
+//! When the upstream PR is in a published release, drop the glob
+//! branch and treat `DEP_DUCKDB_INCLUDE` as required.
 
 fn main() {
     println!("cargo:rerun-if-changed=cpp/extension_shim.cpp");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=DEP_DUCKDB_INCLUDE");
 
     if cfg!(feature = "duckdb") && !cfg!(feature = "loadable_extension") {
         bundled::compile_shim();
@@ -31,8 +33,11 @@ mod bundled {
     use std::path::PathBuf;
 
     pub fn compile_shim() {
-        let include = locate_libduckdb_sys_include()
-            .expect("could not find libduckdb-sys's extracted duckdb headers in the target tree");
+        let include = locate_include().expect(
+            "could not find libduckdb-sys's DuckDB headers — neither \
+             DEP_DUCKDB_INCLUDE was set nor a libduckdb-sys-* build dir \
+             was found in the target tree",
+        );
         eprintln!("dbfy: compiling C++ shim against headers at {}", include.display());
 
         cc::Build::new()
@@ -45,17 +50,21 @@ mod bundled {
             .compile("dbfy_duckdb_shim");
     }
 
-    /// Walk up from `OUT_DIR` to the workspace `target/<profile>/build/`
-    /// directory, then find a `libduckdb-sys-*/out/duckdb/src/include`
-    /// path that exists. Returns the first match.
-    fn locate_libduckdb_sys_include() -> Option<PathBuf> {
+    fn locate_include() -> Option<PathBuf> {
+        if let Ok(s) = std::env::var("DEP_DUCKDB_INCLUDE") {
+            return Some(PathBuf::from(s));
+        }
+        glob_libduckdb_sys_include()
+    }
+
+    /// Fallback: walk up from `OUT_DIR` to `target/<profile>/build/`,
+    /// then find a `libduckdb-sys-*/out/duckdb/src/include` directory.
+    /// Hack — drop once duckdb/duckdb-rs#753 is in a released libduckdb-sys.
+    fn glob_libduckdb_sys_include() -> Option<PathBuf> {
         let out_dir = PathBuf::from(std::env::var_os("OUT_DIR")?);
-        // OUT_DIR layout: <target>/<profile>/build/<crate>-<hash>/out
         let build_dir = out_dir.parent()?.parent()?;
-        let entries = std::fs::read_dir(build_dir).ok()?;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let s = name.to_string_lossy();
+        for entry in std::fs::read_dir(build_dir).ok()?.flatten() {
+            let s = entry.file_name().to_string_lossy().into_owned();
             if !s.starts_with("libduckdb-sys-") {
                 continue;
             }
