@@ -1,90 +1,68 @@
 # dbfy
 
-Embedded SQL federation engine for REST/JSON datasources, local files, and programmatic providers.
+**Embedded SQL federation engine.** Bring REST APIs and line-delimited log
+files (jsonl, csv, logfmt, syslog, regex) to the same SQL surface as your
+Parquet, CSV, and in-memory data — no glue scripts, no `pd.merge`.
 
-## Current status
-
-This repository currently contains an executable MVP slice:
-
-- Rust workspace aligned with the specification.
-- YAML configuration model with fail-fast validation, including RFC 9535 JSONPath syntax checks for root, column, and cursor paths.
-- REST table planning and executable `GET` runtime with page, offset, cursor, and link-header pagination.
-- Programmatic provider traits and scan request/capability types.
-- A reusable static programmatic provider for Arrow `RecordBatch` data.
-- Core engine with DataFusion-backed SQL execution for programmatic and REST providers.
-- Streaming execution for both programmatic and REST providers through native DataFusion batch streams; pages flow incrementally and `LIMIT` can interrupt pagination before later pages are fetched.
-- Full RFC 9535 JSONPath support for root and column extraction (array indexing, slices, filters, recursive descent).
-- Query `explain` output for optimized plans, pushdown visibility, and REST request previews.
-- Minimal CLI with `validate`, `inspect`, `query`, and `explain`.
-- Python bindings (PyO3 + maturin) with sync and `asyncio`-compatible APIs, distributed type stubs (PEP 561), and Python-defined programmatic providers; returns PyArrow `RecordBatch` objects with zero-copy via the Arrow C Data Interface.
-- C bindings (cbindgen) exposing engine lifecycle, query, explain, and Arrow C Data Interface batch export through `libdbfy.{a,so}` and a generated `dbfy.h`.
-- Java bindings scaffolding (`jni` crate + `com.dbfy.Dbfy`) that returns query results as Arrow IPC stream bytes for `ArrowStreamReader` (JDK required only for the Java-side compile, not the Rust build).
-
-Language bindings and advanced REST features are planned in the next milestones. At the moment, REST execution covers `GET` tables with RFC 9535 JSONPath extraction, page/offset/cursor/link-header pagination, basic transient retry, and typed timeout/rate-limit/status errors; richer operational controls and broader Arrow type coverage (`Decimal/List/Struct`) remain pending. The product-facing slice is now broader: the CLI can explain query plans, programmatic providers can be backed by in-memory Arrow batches or custom chunked readers, and the core consumes both programmatic and REST batch streams incrementally instead of materializing them all up front.
-
-## Commands
-
-```bash
-cargo run -p dbfy-cli -- validate dbfy_spec.md
+```sql
+-- One SELECT joining two REST endpoints and a local JSONL log:
+SELECT s.zone, count(*) AS hot_acked
+  FROM dbfy_rest('https://api.example.com/readings', config := '...') r
+  JOIN dbfy_rest('https://api.example.com/sensors',  config := '...') s USING (sensor_id)
+  JOIN dbfy_rows_file('/var/log/fleet.jsonl',        config := '...') e
+    ON e.sensor_id = r.sensor_id AND e.kind = 'alarm_acked'
+ WHERE r.temperature > 22
+ GROUP BY s.zone;
 ```
 
-The example above intentionally fails because `dbfy_spec.md` is not a config file; use it only to verify the CLI wiring.
+→ **[Quickstart](docs/quickstart.md)** — five minutes, zero to your first SQL query.
 
-```bash
-cargo run -p dbfy-frontend-datafusion --example programmatic_csv
-```
+## What it does
 
-The example implements a small chunked CSV provider on top of the programmatic provider layer, reads `crates/dbfy-frontend-datafusion/examples/data/customers.csv` row by row, prints the optimized `explain` output, and then runs the SQL query.
+- **REST/HTTP** — GET endpoints with page / offset / cursor / link-header
+  pagination, retry + `Retry-After`, four auth modes, RFC 9535 JSONPath,
+  filter + projection + limit pushdown, in-memory TTL+singleflight HTTP
+  cache.
+- **Line-delimited files** — jsonl, csv, logfmt, regex (CLF/ELF), syslog
+  (RFC 5424). L3 indexing via persistent `.dbfy_idx` sidecar: zone maps,
+  bloom filters, prefix-hash invalidation, incremental EXTEND on
+  append-only growth, glob multi-file expansion.
+- **Two SQL frontends share one core**:
+  - **Standalone CLI** (`dbfy validate / inspect / explain / query`) backed
+    by a DataFusion engine, with onboarding helpers (`dbfy detect`,
+    `dbfy probe`, `dbfy init`, `dbfy index`, `dbfy duckdb-attach`).
+  - **DuckDB extension** — `LOAD 'dbfy.duckdb_extension'` exposes
+    `dbfy_rest()` and `dbfy_rows_file()` table functions to any DuckDB
+    host (Python, R, JS, JVM, CLI).
+- **Language bindings** — Python (sync + `asyncio`, PyArrow zero-copy via
+  the Arrow C Data Interface, type stubs), C (`cbindgen`), Java
+  (`jni` + Arrow IPC).
 
 ## Layout
 
 ```text
 crates/
-  dbfy-c/                       # C bindings via cbindgen
-  dbfy-cli/
-  dbfy-config/
-  dbfy-frontend-datafusion/     # standalone engine (DataFusion)
-  dbfy-frontend-duckdb/         # DuckDB community extension (scaffold)
-  dbfy-jni/                     # Java bindings via the jni crate
-  dbfy-provider/                # Provider trait + shared types
-  dbfy-provider-rest/           # REST provider impl
-  dbfy-provider-static/         # In-memory RecordBatch provider
-  dbfy-py/                      # Python bindings via PyO3 + maturin
+  dbfy-config/                  # YAML schema + validation
+  dbfy-provider/                # ProgrammaticTableProvider trait
+  dbfy-provider-rest/           # HTTP/JSON source + cache
+  dbfy-provider-rows-file/      # indexed file source
+  dbfy-provider-static/         # in-memory RecordBatch provider
+  dbfy-frontend-datafusion/     # standalone SQL engine
+  dbfy-frontend-duckdb/         # `.duckdb_extension`
+  dbfy-cli/ dbfy-py/ dbfy-c/ dbfy-jni/   # language surfaces
 docs/
+  quickstart.md
   implementation-plan.md
 ```
 
-## Python
+## Documentation
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install maturin pyarrow
-cd crates/dbfy-py && maturin develop
-python tests/smoke.py
-```
+- **[Quickstart](docs/quickstart.md)** — install, build, first query (CLI + DuckDB).
+- [Implementation plan](docs/implementation-plan.md) — milestone-by-milestone history.
+- [DuckDB extension reference](crates/dbfy-frontend-duckdb/README.md) — table-function syntax, demo, capabilities matrix.
+- [Python bindings](crates/dbfy-py/README.md) — `maturin develop` wheel + API.
+- [restsql_spec.md](restsql_spec.md) — original product spec.
 
-See `crates/dbfy-py/README.md` for the full Python API.
+## License
 
-## DuckDB extension (preview)
-
-The `dbfy-frontend-duckdb` crate exposes a `dbfy_rest()` table function
-to embedded DuckDB. The build is gated behind a cargo feature so the
-default workspace build stays fast:
-
-```bash
-cargo check -p dbfy-frontend-duckdb                    # default scaffold (fast)
-cargo check -p dbfy-frontend-duckdb --features duckdb  # bundled DuckDB C++ (~10 min cold)
-cargo test  -p dbfy-frontend-duckdb --features duckdb --jobs 1
-```
-
-```rust
-let conn = duckdb::Connection::open_in_memory()?;
-dbfy_duckdb::register(&conn)?;
-let mut stmt = conn.prepare(
-    "SELECT value FROM dbfy_rest('https://api.example.com/users')",
-)?;
-```
-
-See `crates/dbfy-frontend-duckdb/README.md` for the current capabilities
-and the planned v1 surface (typed columns, filter pushdown, ATTACH).
+Apache-2.0.
