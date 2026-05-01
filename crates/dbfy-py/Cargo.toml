@@ -1,0 +1,23 @@
+[package]
+name = "dbfy-py"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "_dbfy"
+crate-type = ["cdylib"]
+
+[dependencies]
+arrow-array.workspace = true
+arrow-pyarrow = "58.1.0"
+arrow-schema.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
+dbfy-config = { path = "../dbfy-config" }
+dbfy-frontend-datafusion = { path = "../dbfy-frontend-datafusion" }
+dbfy-provider = { path = "../dbfy-provider" }
+tokio.workspace = true

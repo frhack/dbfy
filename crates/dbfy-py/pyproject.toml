@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "dbfy"
+version = "0.1.0"
+description = "Embedded federated SQL engine for REST/JSON datasources"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+]
+dependencies = [
+    "pyarrow>=15.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/example/dbfy"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+strip = true
+python-source = "python"
+module-name = "dbfy._dbfy"

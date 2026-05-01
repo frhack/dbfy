@@ -1,0 +1,19 @@
+[package]
+name = "dbfy-jni"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "dbfy_jni"
+crate-type = ["cdylib"]
+
+[dependencies]
+arrow-array.workspace = true
+arrow-ipc = "58.1.0"
+arrow-schema.workspace = true
+jni = "0.21"
+dbfy-config = { path = "../dbfy-config" }
+dbfy-frontend-datafusion = { path = "../dbfy-frontend-datafusion" }
+tokio.workspace = true

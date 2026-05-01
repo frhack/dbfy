@@ -1,0 +1,14 @@
+[package]
+name = "dbfy-provider"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+

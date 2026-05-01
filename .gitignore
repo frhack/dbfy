@@ -1,0 +1,23 @@
+target/
+
+.venv/
+.mypy_cache/
+.codex
+*.duckdb_extension
+*.dbfy_idx
+
+# Editor swap files
+.*.sw?
+*.swp
+
+# Python build artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.so
+
+# Built Python extensions live under target/wheels/ at release time;
+# the in-tree symlinks/copies under crates/dbfy-py/python/dbfy/ are
+# created by `maturin develop` and should never be committed.
+crates/dbfy-py/python/dbfy/_dbfy*.so
+crates/dbfy-py/python/dbfy/_restsql*.so

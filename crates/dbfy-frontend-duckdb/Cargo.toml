@@ -1,0 +1,69 @@
+[package]
+name = "dbfy-frontend-duckdb"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "dbfy_duckdb"
+crate-type = ["cdylib", "rlib"]
+
+# Two mutually-exclusive opt-in build modes:
+#
+# `--features duckdb`              embedded DuckDB statically linked into
+#                                  the rlib/cdylib (`bundled`). Use when
+#                                  you want a Rust process that contains
+#                                  its own DuckDB engine.
+#
+# `--features loadable_extension`  produce a `.duckdb_extension` cdylib
+#                                  that does NOT carry DuckDB internals;
+#                                  the host DuckDB at LOAD time provides
+#                                  every function we call via the C API
+#                                  access struct. Result: ~5-15 MB binary
+#                                  instead of ~200 MB.
+#
+# Default features are empty so plain `cargo check --workspace` stays
+# fast (no DuckDB C++ compile).
+[features]
+default = []
+# `duckdb?/X` (conditional feature, Cargo 1.60+) enables feature X on the
+# `duckdb` dep only when the dep itself is enabled, AND does NOT bleed
+# through to my own feature named `duckdb`. Without the `?`, Cargo
+# treats `duckdb/X` as also enabling my feature `duckdb`, which would
+# silently drag `bundled` into a `loadable_extension`-only build.
+duckdb = [
+    "dep:duckdb",
+    "dep:url",
+    "dep:serde",
+    "dep:serde_yaml",
+    "duckdb?/bundled",
+    "duckdb?/vtab",
+]
+loadable_extension = [
+    "dep:duckdb",
+    "dep:url",
+    "dep:serde",
+    "dep:serde_yaml",
+    "duckdb?/loadable-extension",
+]
+
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+dbfy-config = { path = "../dbfy-config" }
+dbfy-provider = { path = "../dbfy-provider" }
+dbfy-provider-rest = { path = "../dbfy-provider-rest" }
+dbfy-provider-rows-file = { path = "../dbfy-provider-rows-file" }
+duckdb = { version = "1.4", optional = true, default-features = false }
+futures.workspace = true
+serde = { workspace = true, optional = true }
+serde_yaml = { workspace = true, optional = true }
+tokio.workspace = true
+url = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = "1.0.149"
+tempfile = "3.27.0"
+tokio.workspace = true
+wiremock = "0.6.5"

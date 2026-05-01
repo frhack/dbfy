@@ -1,0 +1,20 @@
+[package]
+name = "dbfy-c"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "dbfy"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+arrow-array = { workspace = true, features = ["ffi"] }
+arrow-schema.workspace = true
+dbfy-config = { path = "../dbfy-config" }
+dbfy-frontend-datafusion = { path = "../dbfy-frontend-datafusion" }
+tokio.workspace = true
+
+[build-dependencies]
+cbindgen = "0.29"

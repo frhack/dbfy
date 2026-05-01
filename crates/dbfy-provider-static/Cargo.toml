@@ -1,0 +1,13 @@
+[package]
+name = "dbfy-provider-static"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+async-trait.workspace = true
+dbfy-provider = { path = "../dbfy-provider" }
+futures.workspace = true
