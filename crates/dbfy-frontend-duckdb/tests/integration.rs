@@ -38,6 +38,78 @@ fn cpp_shim_can_reach_duckdb_cpp_side() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn optimizer_hook_observes_filter_pushdown_candidates() {
+    // Stand up a wiremock so dbfy_rest has a real endpoint to scan.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": 1, "name": "Mario", "status": "active"},
+                {"id": 2, "name": "Anna",  "status": "inactive"},
+                {"id": 3, "name": "Luca",  "status": "active"},
+            ]
+        })))
+        .mount(&server)
+        .await;
+    let url = format!("{}/users", server.uri());
+
+    let observations = tokio::task::spawn_blocking(move || {
+        use duckdb::Connection;
+        use duckdb::ffi;
+        use std::ffi::CString;
+
+        // Open a raw db, install our optimizer hook, then wrap as a
+        // duckdb-rs Connection. The hook lives on the database, so
+        // every query planned through this connection (and any other
+        // connection on the same db) walks through it.
+        let mut raw_db: ffi::duckdb_database = std::ptr::null_mut();
+        let path = CString::new(":memory:").unwrap();
+        let r = unsafe { ffi::duckdb_open(path.as_ptr(), &mut raw_db) };
+        assert_eq!(r, ffi::DuckDBSuccess, "duckdb_open failed");
+
+        unsafe { dbfy_duckdb::install_optimizer_hook(raw_db).expect("install hook"); }
+
+        let conn = unsafe { Connection::open_from_raw(raw_db) }.expect("open_from_raw");
+        dbfy_duckdb::register(&conn).expect("register dbfy");
+
+        // Clear in case any earlier test on this thread left scraps.
+        let _ = dbfy_duckdb::shim_drain_observations();
+
+        let cfg = r#"
+root: $.data[*]
+columns:
+  id:     {path: "$.id",     type: int64}
+  name:   {path: "$.name",   type: string}
+  status: {path: "$.status", type: string}
+"#;
+        let sql = "SELECT id FROM dbfy_rest(?, config := ?) WHERE id > 0 AND status = 'active'";
+        let mut stmt = conn.prepare(sql).expect("prepare");
+        let rows: Vec<i64> = stmt
+            .query_map([&url, cfg], |row| row.get::<_, i64>(0))
+            .expect("query")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(rows.len(), 2, "rows={rows:?}");
+
+        dbfy_duckdb::shim_drain_observations()
+    })
+    .await
+    .expect("blocking");
+
+    // The optimizer hook should have recorded at least one observation
+    // mentioning dbfy_rest and the filter expression text.
+    assert!(
+        observations.contains("dbfy_rest"),
+        "expected dbfy_rest in observations, got `{observations}`"
+    );
+    assert!(
+        observations.contains("id") && observations.contains("status"),
+        "expected both filter columns referenced, got `{observations}`"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn dbfy_rest_round_trip() {
     let server = MockServer::start().await;
 

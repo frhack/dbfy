@@ -47,9 +47,14 @@ mod rows_file_vtab;
 mod shim {
     use std::ffi::CStr;
 
+    use duckdb::ffi;
+
     unsafe extern "C" {
         fn dbfy_shim_probe() -> u32;
         fn dbfy_shim_duckdb_version() -> *const std::os::raw::c_char;
+        fn dbfy_shim_install_optimizer_db(db: ffi::duckdb_database) -> i32;
+        fn dbfy_shim_observations_peek() -> *const std::os::raw::c_char;
+        fn dbfy_shim_observations_clear();
     }
 
     /// Confirm the C++ shim was compiled and linked. Returns 0xDBFEC5
@@ -60,17 +65,49 @@ mod shim {
     }
 
     /// Bundled DuckDB library version, as reported by `duckdb::DuckDB::LibraryVersion()`.
-    /// Confirms the shim can reach into the C++ side of DuckDB.
     pub fn duckdb_version() -> &'static str {
         unsafe {
             let p = dbfy_shim_duckdb_version();
             CStr::from_ptr(p).to_str().expect("duckdb version is valid utf-8")
         }
     }
+
+    /// Register dbfy's OptimizerExtension on the given raw DuckDB
+    /// database handle. After this call, every query planned on any
+    /// connection to this database walks through dbfy's optimizer hook.
+    ///
+    /// Returns `Ok(())` on success. Failure means either the handle is
+    /// null or the DuckDB internal layout assumption (`DatabaseWrapper`
+    /// from `capi_internal.hpp`) no longer matches — both are bugs.
+    ///
+    /// # Safety
+    /// The caller must ensure `raw_db` is a valid `duckdb_database`
+    /// returned by `ffi::duckdb_open` and not yet closed.
+    pub unsafe fn install_optimizer_hook(raw_db: ffi::duckdb_database) -> Result<(), i32> {
+        let code = unsafe { dbfy_shim_install_optimizer_db(raw_db) };
+        if code == 0 { Ok(()) } else { Err(code) }
+    }
+
+    /// Take and clear the thread-local observation buffer. Returns the
+    /// `\n`-joined "function_name | filter_expr" lines the optimizer
+    /// hook recorded since the last drain on this thread. Test-only —
+    /// production code shouldn't need this.
+    pub fn drain_observations() -> String {
+        unsafe {
+            let p = dbfy_shim_observations_peek();
+            let cstr = CStr::from_ptr(p);
+            let owned = cstr.to_string_lossy().into_owned();
+            dbfy_shim_observations_clear();
+            owned
+        }
+    }
 }
 
 #[cfg(all(feature = "duckdb", not(feature = "loadable_extension")))]
-pub use shim::{duckdb_version as shim_duckdb_version, probe as shim_probe};
+pub use shim::{
+    drain_observations as shim_drain_observations, duckdb_version as shim_duckdb_version,
+    install_optimizer_hook, probe as shim_probe,
+};
 
 #[cfg(any(feature = "duckdb", feature = "loadable_extension"))]
 pub use rest_vtab::register as register_rest;
