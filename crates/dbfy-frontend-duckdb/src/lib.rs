@@ -45,9 +45,10 @@ mod rows_file_vtab;
 /// just returns a sentinel to confirm the link works end-to-end.
 #[cfg(all(feature = "duckdb", not(feature = "loadable_extension")))]
 mod shim {
-    use std::ffi::CStr;
+    use std::ffi::{CStr, c_void};
 
     use duckdb::ffi;
+    use serde::Deserialize;
 
     unsafe extern "C" {
         fn dbfy_shim_probe() -> u32;
@@ -55,6 +56,22 @@ mod shim {
         fn dbfy_shim_install_optimizer_db(db: ffi::duckdb_database) -> i32;
         fn dbfy_shim_observations_peek() -> *const std::os::raw::c_char;
         fn dbfy_shim_observations_clear();
+        fn dbfy_shim_take_filters(bind_data: *mut c_void) -> *mut std::os::raw::c_char;
+        fn dbfy_shim_free_string(p: *mut std::os::raw::c_char);
+    }
+
+    /// One predicate the optimizer recognised as `column OP constant`
+    /// (or its commuted form). Type is the DuckDB `LogicalType` name —
+    /// e.g. `INTEGER`, `BIGINT`, `VARCHAR`, `BOOLEAN`. The Rust side
+    /// uses it to coerce the string `value` into the right
+    /// `ScalarValue` variant when forwarding to typed providers.
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct PushdownFilter {
+        pub column: String,
+        pub op: String,
+        pub value: String,
+        #[serde(rename = "type")]
+        pub duck_type: String,
     }
 
     /// Confirm the C++ shim was compiled and linked. Returns 0xDBFEC5
@@ -101,12 +118,38 @@ mod shim {
             owned
         }
     }
+
+    /// Take ownership of the pushdown filters the optimizer extension
+    /// stashed for `bind_data`. Returns `Ok(vec)` (possibly empty) on
+    /// success, `Err(_)` only if the JSON shape is wrong (a bug). A
+    /// `Some` empty vec vs `None` distinguishes "no pushdown opportunity
+    /// at all" from "the JSON parsed but contained zero filters".
+    ///
+    /// # Safety
+    /// `bind_data` must be the same `*const T` pointer DuckDB stashed
+    /// in the `LogicalGet::bind_data` slot for this query — typically
+    /// retrieved via `InitInfo::get_bind_data::<T>()` cast to
+    /// `*mut c_void`.
+    pub unsafe fn take_pushdown_filters(
+        bind_data: *mut c_void,
+    ) -> Result<Option<Vec<PushdownFilter>>, serde_json::Error> {
+        let raw = unsafe { dbfy_shim_take_filters(bind_data) };
+        if raw.is_null() {
+            return Ok(None);
+        }
+        let result = unsafe {
+            let json_str = CStr::from_ptr(raw).to_string_lossy().into_owned();
+            dbfy_shim_free_string(raw);
+            serde_json::from_str::<Vec<PushdownFilter>>(&json_str)
+        };
+        result.map(Some)
+    }
 }
 
 #[cfg(all(feature = "duckdb", not(feature = "loadable_extension")))]
 pub use shim::{
     drain_observations as shim_drain_observations, duckdb_version as shim_duckdb_version,
-    install_optimizer_hook, probe as shim_probe,
+    install_optimizer_hook, probe as shim_probe, take_pushdown_filters, PushdownFilter,
 };
 
 #[cfg(any(feature = "duckdb", feature = "loadable_extension"))]

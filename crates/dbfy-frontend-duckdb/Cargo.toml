@@ -37,6 +37,7 @@ duckdb = [
     "dep:url",
     "dep:serde",
     "dep:serde_yaml",
+    "dep:serde_json",
     "dep:cc",
     "duckdb?/bundled",
     "duckdb?/vtab",
@@ -59,6 +60,7 @@ dbfy-provider-rows-file = { path = "../dbfy-provider-rows-file" }
 duckdb = { version = "1.4", optional = true, default-features = false }
 futures.workspace = true
 serde = { workspace = true, optional = true }
+serde_json = { version = "1.0.149", optional = true }
 serde_yaml = { workspace = true, optional = true }
 tokio.workspace = true
 url = { workspace = true, optional = true }

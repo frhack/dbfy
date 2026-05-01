@@ -110,6 +110,95 @@ columns:
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pushdown_filter_appears_in_rest_url() {
+    use wiremock::matchers::query_param;
+
+    // Mount two mocks: one that REQUIRES the pushed query-string params
+    // and would 404 otherwise. If pushdown actually fired the filter
+    // values land in the URL and this mock matches.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users"))
+        .and(query_param("status", "active"))
+        .and(query_param("min_id", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": 2, "name": "Anna",  "status": "active"},
+                     {"id": 3, "name": "Luca",  "status": "active"}]
+        })))
+        .mount(&server)
+        .await;
+    // Fallback that returns an obviously-wrong payload if the params
+    // weren't pushed; assertions on row count + row contents will then
+    // fail, signalling pushdown didn't fire.
+    Mock::given(method("GET"))
+        .and(path("/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": 999, "name": "FALLBACK", "status": "should-not-see"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/users", server.uri());
+
+    let names = tokio::task::spawn_blocking(move || {
+        use duckdb::Connection;
+        use duckdb::ffi;
+        use std::ffi::CString;
+
+        let mut raw_db: ffi::duckdb_database = std::ptr::null_mut();
+        let path = CString::new(":memory:").unwrap();
+        assert_eq!(
+            unsafe { ffi::duckdb_open(path.as_ptr(), &mut raw_db) },
+            ffi::DuckDBSuccess,
+            "duckdb_open failed",
+        );
+        unsafe { dbfy_duckdb::install_optimizer_hook(raw_db).expect("install hook") };
+        let conn = unsafe { Connection::open_from_raw(raw_db) }.expect("open_from_raw");
+        dbfy_duckdb::register(&conn).expect("register dbfy");
+
+        // Config maps the SQL columns `id` / `status` onto query-string
+        // params `min_id` / `status` for `>=` and `=` operators
+        // respectively. The C++ optimizer extension extracts the WHERE
+        // predicates, the Rust side hands them to `RestTable`, and
+        // `RestRequestPlan` translates them into URL params per the
+        // pushdown rules below.
+        let cfg = r#"
+root: $.data[*]
+columns:
+  id:     {path: "$.id",     type: int64}
+  name:   {path: "$.name",   type: string}
+  status: {path: "$.status", type: string}
+pushdown:
+  filters:
+    id:
+      param: min_id
+      operators: [">="]
+    status:
+      param: status
+      operators: ["="]
+"#;
+        let sql = "SELECT name FROM dbfy_rest(?, config := ?) \
+                   WHERE id >= 1 AND status = 'active' \
+                   ORDER BY name";
+        let mut stmt = conn.prepare(sql).expect("prepare");
+        let rows: Vec<String> = stmt
+            .query_map([&url, cfg], |row| row.get::<_, String>(0))
+            .expect("query")
+            .filter_map(Result::ok)
+            .collect();
+        rows
+    })
+    .await
+    .expect("blocking");
+
+    // Expect Anna + Luca (the active rows the matching mock returned).
+    // If pushdown didn't fire, the fallback mock would have returned
+    // a single FALLBACK row and this assert would catch it.
+    assert_eq!(names, vec!["Anna".to_string(), "Luca".to_string()],
+        "filter pushdown did not produce the expected query params");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn dbfy_rest_round_trip() {
     let server = MockServer::start().await;
 

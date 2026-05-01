@@ -34,13 +34,14 @@
 //! come from the positional arg).
 
 use std::error::Error as StdError;
+use std::ffi::c_void;
 use std::sync::Mutex;
 
 use arrow_array::RecordBatch;
 use dbfy_config::{
     IndexedColumnConfig, ParserConfig, RowsFileTableConfig,
 };
-use dbfy_provider::ProgrammaticTableProvider;
+use dbfy_provider::{FilterOperator, ProgrammaticTableProvider, ScalarValue, SimpleFilter};
 use dbfy_provider_rows_file::{build_handle, RowsFileHandle};
 use duckdb::Connection;
 use duckdb::core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId};
@@ -50,6 +51,7 @@ use serde::Deserialize;
 use tokio::runtime::Runtime;
 
 use crate::arrow_to_duckdb::{cell_type_to_duckdb, write_arrow_column};
+use crate::shim::PushdownFilter;
 
 /// Slim YAML schema for the inline `config` argument.
 ///
@@ -120,13 +122,30 @@ impl VTab for RowsFileVTab {
     }
 
     fn init(info: &InitInfo) -> Result<Self::InitData, Box<dyn StdError>> {
-        let bind: &RowsFileBindData = unsafe { &*info.get_bind_data::<RowsFileBindData>() };
+        let bind_ptr: *const RowsFileBindData = info.get_bind_data::<RowsFileBindData>();
+        let bind: &RowsFileBindData = unsafe { &*bind_ptr };
 
         let column_indices = info.get_column_indices();
         let projection_names: Vec<String> = column_indices
             .iter()
             .filter_map(|&i| bind.columns_order.get(i as usize).cloned())
             .collect();
+
+        // Same side-channel drain as in rest_vtab. Filters that don't
+        // map cleanly onto our typed FilterOperator + ScalarValue are
+        // dropped here; DuckDB's filter operator above the LogicalGet
+        // still applies them, so the only cost is missed pruning.
+        let pushed_filters: Vec<SimpleFilter> = unsafe {
+            crate::shim::take_pushdown_filters(bind_ptr as *mut c_void)
+        }
+        .map_err(|err| Box::<dyn StdError>::from(format!("invalid pushdown JSON: {err}")))?
+        .map(|filters| {
+            filters
+                .into_iter()
+                .filter_map(pushdown_to_typed_filter)
+                .collect()
+        })
+        .unwrap_or_default();
 
         // Compose `RowsFileTableConfig`: positional arg → path or glob,
         // inline YAML → parser + indexed_columns + chunk_rows.
@@ -137,8 +156,9 @@ impl VTab for RowsFileVTab {
 
         let runtime = Runtime::new()?;
         let projection_for_provider = projection_names.clone();
+        let filters_for_provider = pushed_filters;
         let batches: Vec<RecordBatch> = runtime.block_on(async move {
-            let response = scan_handle(&handle, projection_for_provider)
+            let response = scan_handle(&handle, projection_for_provider, filters_for_provider)
                 .await
                 .map_err(|err| Box::<dyn StdError>::from(err.to_string()))?;
             let mut all = Vec::new();
@@ -239,6 +259,7 @@ fn compose_table_config(target: &str, ext: &ExtensionConfig) -> RowsFileTableCon
 async fn scan_handle(
     handle: &RowsFileHandle,
     projection: Vec<String>,
+    filters: Vec<SimpleFilter>,
 ) -> dbfy_provider::ProviderResult<
     futures::stream::BoxStream<'static, dbfy_provider::ProviderResult<RecordBatch>>,
 > {
@@ -248,7 +269,7 @@ async fn scan_handle(
         } else {
             Some(projection)
         },
-        filters: Vec::new(),
+        filters,
         limit: None,
         order_by: Vec::new(),
         query_id: "duckdb-vtab".to_string(),
@@ -258,6 +279,54 @@ async fn scan_handle(
         RowsFileHandle::Glob(g) => g.scan(request).await?,
     };
     Ok(response.stream)
+}
+
+/// Convert a typeless pushdown filter from the C++ shim into the typed
+/// `SimpleFilter` shape the rows-file pruner expects. Returns `None`
+/// when the operator or the LogicalType isn't one we handle yet — the
+/// LogicalFilter above the LogicalGet still evaluates the predicate
+/// in that case, so we lose pruning but never correctness.
+fn pushdown_to_typed_filter(f: PushdownFilter) -> Option<SimpleFilter> {
+    let operator = match f.op.as_str() {
+        "=" => FilterOperator::Eq,
+        ">" => FilterOperator::Gt,
+        ">=" => FilterOperator::Gte,
+        "<" => FilterOperator::Lt,
+        "<=" => FilterOperator::Lte,
+        // `!=` and `IN`/`NOT IN` aren't represented in the rows-file
+        // pruner's operator set; drop them and rely on DuckDB to
+        // re-apply above the scan.
+        _ => return None,
+    };
+    let value = parse_typed_value(&f.duck_type, &f.value)?;
+    Some(SimpleFilter {
+        column: f.column,
+        operator,
+        value,
+    })
+}
+
+/// Decode the DuckDB `LogicalType`-name + stringified value pair the
+/// shim emits into a `ScalarValue`. We accept the common names DuckDB
+/// uses; uncommon types fall through to `None` which drops the filter.
+fn parse_typed_value(duck_type: &str, value: &str) -> Option<ScalarValue> {
+    let upper = duck_type.to_ascii_uppercase();
+    match upper.as_str() {
+        "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "INT" | "UTINYINT"
+        | "USMALLINT" | "UINTEGER" | "UBIGINT" => value.parse::<i64>().ok().map(ScalarValue::Int64),
+        "FLOAT" | "DOUBLE" | "REAL" | "DECIMAL" => {
+            value.parse::<f64>().ok().map(ScalarValue::Float64)
+        }
+        "BOOLEAN" | "BOOL" => match value {
+            "true" | "TRUE" | "t" | "T" | "1" => Some(ScalarValue::Boolean(true)),
+            "false" | "FALSE" | "f" | "F" | "0" => Some(ScalarValue::Boolean(false)),
+            _ => None,
+        },
+        // Default to string for VARCHAR / DATE / TIMESTAMP / etc. The
+        // string form of a date or timestamp is exactly what our
+        // parsers compare against today.
+        _ => Some(ScalarValue::Utf8(value.to_string())),
+    }
 }
 
 /// Register `dbfy_rows_file()` on a DuckDB connection.

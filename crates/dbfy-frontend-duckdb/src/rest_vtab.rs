@@ -35,6 +35,7 @@
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
+use std::ffi::c_void;
 use std::sync::Mutex;
 
 use arrow_array::RecordBatch;
@@ -42,7 +43,7 @@ use dbfy_config::{
     AuthConfig, ColumnConfig, DataType, EndpointConfig, HttpMethod, PaginationConfig,
     PushdownConfig, RestSourceConfig, RestTableConfig,
 };
-use dbfy_provider_rest::RestTable;
+use dbfy_provider_rest::{RestTable, SimpleFilter as RestSimpleFilter};
 use duckdb::Connection;
 use duckdb::core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId};
 use duckdb::vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab};
@@ -152,7 +153,8 @@ impl VTab for RestVTab {
     }
 
     fn init(info: &InitInfo) -> Result<Self::InitData, Box<dyn StdError>> {
-        let bind: &RestBindData = unsafe { &*info.get_bind_data::<RestBindData>() };
+        let bind_ptr: *const RestBindData = info.get_bind_data::<RestBindData>();
+        let bind: &RestBindData = unsafe { &*bind_ptr };
 
         // Projection pushdown: DuckDB tells us via `get_column_indices`
         // which columns the consumer actually needs. Translate indices
@@ -164,6 +166,28 @@ impl VTab for RestVTab {
             .iter()
             .filter_map(|&i| bind.columns_order.get(i as usize).cloned())
             .collect();
+
+        // Filter pushdown via the C++ optimizer-extension shim. The
+        // shim stashed the WHERE-clause predicates keyed by the same
+        // bind-data pointer DuckDB hands to `init`, so a one-shot
+        // take here drains them. `None` means no pushdown opportunity
+        // was recognised; we still scan, just without any pushed
+        // predicates.
+        let pushed_filters: Vec<RestSimpleFilter> = unsafe {
+            crate::shim::take_pushdown_filters(bind_ptr as *mut c_void)
+        }
+        .map_err(|err| Box::<dyn StdError>::from(format!("invalid pushdown JSON: {err}")))?
+        .map(|filters| {
+            filters
+                .into_iter()
+                .map(|f| RestSimpleFilter {
+                    column: f.column,
+                    operator: f.op,
+                    value: f.value,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
         let table_config = RestTableConfig {
             endpoint: EndpointConfig {
@@ -190,9 +214,10 @@ impl VTab for RestVTab {
 
         let runtime = Runtime::new()?;
         let projection_for_provider: Vec<String> = projection_names.clone();
+        let filters_for_provider = pushed_filters;
         let batches: Vec<RecordBatch> = runtime.block_on(async move {
             let stream = table
-                .execute_stream(&projection_for_provider, &[], None)
+                .execute_stream(&projection_for_provider, &filters_for_provider, None)
                 .map_err(|err| Box::<dyn StdError>::from(err.to_string()))?;
             let mut all = Vec::new();
             let mut chunks = stream.stream;
