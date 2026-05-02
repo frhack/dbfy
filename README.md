@@ -65,8 +65,12 @@ cargo build --release -p dbfy-cli
 |---|---|---|
 | **REST / HTTP** | ✅ stable | page / offset / cursor / link-header pagination · 4 auth modes · retry + `Retry-After` · in-memory TTL + singleflight HTTP cache · filter pushdown into URL params |
 | **Line-delimited files** | ✅ stable | JSONL · CSV · logfmt · syslog (RFC 5424) · regex (CLF / ELF) — with L3 indexing (zone maps + bloom + incremental EXTEND on append) and glob multi-file expansion |
+| **Parquet** | ✅ stable | local files + glob, schema auto-discovery, predicate / projection / limit pushdown via DataFusion's native parquet reader |
+| **Excel** (`.xlsx` / `.xls`) | 🟢 v1 | sheet selection, header / no-header, all values typed as string in v1 (type inference is future work) |
+| **GraphQL** | 🟢 v1 | POST + bearer auth, JSONPath root extraction, typed columns. Variables / pagination / subscriptions are future work |
+| **PostgreSQL** | 🟢 v1 | read-only `SELECT` against declared relations, type mapping for bool/int/float/text. Filter+projection pushdown into the wire query is future work — [#2](https://github.com/frhack/dbfy/issues/2) |
 | **In-memory programmatic** | ✅ stable | static Arrow `RecordBatch` provider · Python-defined custom providers via Arrow C Data Interface |
-| **Coming next** | 🟡 wishlist — file a bug to vote | GraphQL · gRPC · Parquet remote · XML · LDAP · HTML / DOM scraping |
+| **Coming next** | 🟡 wishlist — [vote with an issue](https://github.com/frhack/dbfy/issues?q=is%3Aissue+label%3Asource-request) | MySQL · gRPC · Parquet remote (S3/GCS) · Kafka · MongoDB · Loki / Prometheus · LDAP · HTML / DOM scraping |
 
 ## Layout
 

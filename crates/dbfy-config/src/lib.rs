@@ -70,6 +70,10 @@ impl Config {
 pub enum SourceConfig {
     Rest(RestSourceConfig),
     RowsFile(RowsFileSourceConfig),
+    Parquet(ParquetSourceConfig),
+    Excel(ExcelSourceConfig),
+    Graphql(GraphqlSourceConfig),
+    Postgres(PostgresSourceConfig),
 }
 
 impl SourceConfig {
@@ -77,8 +81,201 @@ impl SourceConfig {
         match self {
             Self::Rest(rest) => rest.validate(source_name),
             Self::RowsFile(rf) => rf.validate(source_name),
+            Self::Parquet(p) => p.validate(source_name),
+            Self::Excel(e) => e.validate(source_name),
+            Self::Graphql(g) => g.validate(source_name),
+            Self::Postgres(pg) => pg.validate(source_name),
         }
     }
+}
+
+// ---------------------------------------------------------------
+// Parquet source — local files / dirs / globs of `.parquet` files.
+// Schema is auto-detected by DataFusion at first scan; the YAML only
+// names the tables and points at their physical paths.
+// ---------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParquetSourceConfig {
+    pub tables: BTreeMap<String, ParquetTableConfig>,
+}
+
+impl ParquetSourceConfig {
+    fn validate(&self, source_name: &str) -> Result<()> {
+        if self.tables.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "source `{source_name}` must define at least one table"
+            )));
+        }
+        for (table_name, table) in &self.tables {
+            if table_name.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "source `{source_name}` contains an empty table name"
+                )));
+            }
+            if table.path.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "table `{source_name}.{table_name}` must define a non-empty path"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParquetTableConfig {
+    /// File path, directory, or glob (`logs/*.parquet`).
+    pub path: String,
+}
+
+// ---------------------------------------------------------------
+// Excel source — `.xlsx` / `.xls` workbooks. Each declared table
+// targets one sheet. Type inference happens at scan time from
+// sampled rows, mirroring how `dbfy detect <file.csv>` works today.
+// ---------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExcelSourceConfig {
+    pub tables: BTreeMap<String, ExcelTableConfig>,
+}
+
+impl ExcelSourceConfig {
+    fn validate(&self, source_name: &str) -> Result<()> {
+        if self.tables.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "source `{source_name}` must define at least one table"
+            )));
+        }
+        for (table_name, table) in &self.tables {
+            if table_name.trim().is_empty() || table.path.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "table `{source_name}.{table_name}` requires a non-empty path"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExcelTableConfig {
+    pub path: String,
+    /// Sheet name. If omitted, the first sheet is used.
+    #[serde(default)]
+    pub sheet: Option<String>,
+    /// Whether the first row is a header (default `true`).
+    #[serde(default = "default_excel_has_header")]
+    pub has_header: bool,
+}
+
+fn default_excel_has_header() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------
+// GraphQL source — single endpoint, one declared query per table.
+// Uses POST + JSON body. Pagination + filter pushdown are deferred
+// to a future sprint; v1 just sends the literal query and root-
+// extracts the response via JSONPath.
+// ---------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphqlSourceConfig {
+    pub endpoint: String,
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
+    pub tables: BTreeMap<String, GraphqlTableConfig>,
+}
+
+impl GraphqlSourceConfig {
+    fn validate(&self, source_name: &str) -> Result<()> {
+        if self.endpoint.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "source `{source_name}` must define a non-empty endpoint"
+            )));
+        }
+        if self.tables.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "source `{source_name}` must define at least one table"
+            )));
+        }
+        for (table_name, table) in &self.tables {
+            if table_name.trim().is_empty() || table.query.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "table `{source_name}.{table_name}` requires a non-empty query"
+                )));
+            }
+            for column in table.columns.values() {
+                JsonPath::parse(&column.path).map_err(|err| {
+                    ConfigError::Validation(format!(
+                        "table `{source_name}.{table_name}` column path `{}` invalid: {err}",
+                        column.path
+                    ))
+                })?;
+            }
+            JsonPath::parse(&table.root).map_err(|err| {
+                ConfigError::Validation(format!(
+                    "table `{source_name}.{table_name}` root `{}` invalid: {err}",
+                    table.root
+                ))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphqlTableConfig {
+    /// Literal GraphQL query body. Variables are not yet pushed down.
+    pub query: String,
+    /// JSONPath into the response body (e.g. `$.data.users[*]`).
+    pub root: String,
+    pub columns: BTreeMap<String, ColumnConfig>,
+}
+
+// ---------------------------------------------------------------
+// PostgreSQL source — wire-protocol connection + read-only SELECT
+// against declared tables. Pushdown for filter / projection / limit
+// will be added in a follow-up; v1 fetches and lets the engine
+// filter above the scan.
+// ---------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PostgresSourceConfig {
+    /// Postgres connection string (e.g. `postgres://user:pass@host:5432/db`).
+    pub connection: String,
+    pub tables: BTreeMap<String, PostgresTableConfig>,
+}
+
+impl PostgresSourceConfig {
+    fn validate(&self, source_name: &str) -> Result<()> {
+        if self.connection.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "source `{source_name}` requires a non-empty connection string"
+            )));
+        }
+        if self.tables.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "source `{source_name}` must define at least one table"
+            )));
+        }
+        for (table_name, table) in &self.tables {
+            if table_name.trim().is_empty() || table.relation.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "table `{source_name}.{table_name}` requires a non-empty relation"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PostgresTableConfig {
+    /// Schema-qualified table name (`public.users`) or unqualified
+    /// (`users`). Used as `SELECT … FROM <relation>`.
+    pub relation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

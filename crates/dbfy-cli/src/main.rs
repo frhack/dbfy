@@ -265,9 +265,10 @@ fn index_cmd(config_path: PathBuf, qualified: String, rebuild: bool) -> Result<(
         .ok_or_else(|| anyhow::anyhow!("source `{source_name}` not found in config"))?;
     let rf = match source {
         SourceConfig::RowsFile(rf) => rf,
-        SourceConfig::Rest(_) => {
+        other => {
             anyhow::bail!(
-                "source `{source_name}` is a REST source — `dbfy index` only operates on rows_file sources"
+                "source `{source_name}` is `{:?}` — `dbfy index` only operates on rows_file sources",
+                std::mem::discriminant(other)
             )
         }
     };
@@ -326,6 +327,10 @@ fn validate(config: PathBuf) -> Result<()> {
         .map(|source| match source {
             dbfy_config::SourceConfig::Rest(rest) => rest.tables.len(),
             dbfy_config::SourceConfig::RowsFile(rf) => rf.tables.len(),
+            dbfy_config::SourceConfig::Parquet(p) => p.tables.len(),
+            dbfy_config::SourceConfig::Excel(e) => e.tables.len(),
+            dbfy_config::SourceConfig::Graphql(g) => g.tables.len(),
+            dbfy_config::SourceConfig::Postgres(pg) => pg.tables.len(),
         })
         .sum::<usize>();
 

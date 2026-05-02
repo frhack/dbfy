@@ -73,9 +73,35 @@ pub fn emit_attach_sql(config: &Config, opts: &AttachOpts) -> Result<String> {
             SourceConfig::RowsFile(rf) => {
                 emit_rows_file_views(&mut out, source_name, rf, &opts.schema, create_kw)?;
             }
+            // The DuckDB extension exposes only `dbfy_rest()` and
+            // `dbfy_rows_file()` table functions today; parquet /
+            // excel / graphql / postgres sources can be queried
+            // through the standalone CLI but won't show up under
+            // `dbfy duckdb-attach` until corresponding DuckDB
+            // table-function wrappers are added.
+            SourceConfig::Parquet(_)
+            | SourceConfig::Excel(_)
+            | SourceConfig::Graphql(_)
+            | SourceConfig::Postgres(_) => {
+                out.push_str(&format!(
+                    "-- source `{source_name}` ({}) skipped — not yet wired into the DuckDB extension\n\n",
+                    source_kind_name(source)
+                ));
+            }
         }
     }
     Ok(out)
+}
+
+fn source_kind_name(source: &SourceConfig) -> &'static str {
+    match source {
+        SourceConfig::Rest(_) => "rest",
+        SourceConfig::RowsFile(_) => "rows_file",
+        SourceConfig::Parquet(_) => "parquet",
+        SourceConfig::Excel(_) => "excel",
+        SourceConfig::Graphql(_) => "graphql",
+        SourceConfig::Postgres(_) => "postgres",
+    }
 }
 
 fn emit_rest_views(

@@ -72,6 +72,37 @@ pub struct Engine {
     config: Option<Config>,
     rest_tables: BTreeMap<String, RestTable>,
     programmatic_tables: BTreeMap<String, DynProvider>,
+    /// Sources that need async setup at session-build time
+    /// (parquet schema discovery, excel/postgres materialisation,
+    /// graphql query execution). Stored verbatim and replayed in
+    /// `build_session_context`.
+    deferred_sources: Vec<DeferredSource>,
+}
+
+/// Sources whose registration into a `SessionContext` happens at
+/// `build_session_context()` time because it's async (or because we
+/// materialise into a `MemTable` from a one-shot fetch).
+#[derive(Debug, Clone)]
+enum DeferredSource {
+    Parquet {
+        qualified: String,
+        path: String,
+    },
+    Excel {
+        qualified: String,
+        cfg: dbfy_config::ExcelTableConfig,
+    },
+    Graphql {
+        qualified: String,
+        endpoint: String,
+        auth: Option<dbfy_config::AuthConfig>,
+        table: dbfy_config::GraphqlTableConfig,
+    },
+    Postgres {
+        qualified: String,
+        connection: String,
+        relation: String,
+    },
 }
 
 impl Engine {
@@ -98,6 +129,41 @@ impl Engine {
                         engine
                             .programmatic_tables
                             .insert(qualify_table_name(source_name, table_name), provider);
+                    }
+                }
+                SourceConfig::Parquet(p) => {
+                    for (table_name, table_cfg) in &p.tables {
+                        engine.deferred_sources.push(DeferredSource::Parquet {
+                            qualified: qualify_table_name(source_name, table_name),
+                            path: table_cfg.path.clone(),
+                        });
+                    }
+                }
+                dbfy_config::SourceConfig::Excel(e) => {
+                    for (table_name, table_cfg) in &e.tables {
+                        engine.deferred_sources.push(DeferredSource::Excel {
+                            qualified: qualify_table_name(source_name, table_name),
+                            cfg: table_cfg.clone(),
+                        });
+                    }
+                }
+                SourceConfig::Graphql(g) => {
+                    for (table_name, table_cfg) in &g.tables {
+                        engine.deferred_sources.push(DeferredSource::Graphql {
+                            qualified: qualify_table_name(source_name, table_name),
+                            endpoint: g.endpoint.clone(),
+                            auth: g.auth.clone(),
+                            table: table_cfg.clone(),
+                        });
+                    }
+                }
+                dbfy_config::SourceConfig::Postgres(pg) => {
+                    for (table_name, table_cfg) in &pg.tables {
+                        engine.deferred_sources.push(DeferredSource::Postgres {
+                            qualified: qualify_table_name(source_name, table_name),
+                            connection: pg.connection.clone(),
+                            relation: table_cfg.relation.clone(),
+                        });
                     }
                 }
             }
@@ -138,20 +204,20 @@ impl Engine {
     }
 
     pub async fn query(&self, sql: &str) -> Result<Vec<RecordBatch>> {
-        let ctx = self.build_session_context()?;
+        let ctx = self.build_session_context().await?;
         let dataframe = ctx.sql(sql).await?;
         let batches = dataframe.collect().await?;
         Ok(batches)
     }
 
     pub async fn explain(&self, sql: &str) -> Result<String> {
-        let ctx = self.build_session_context()?;
+        let ctx = self.build_session_context().await?;
         let dataframe = ctx.sql(sql).await?;
         let plan = dataframe.into_optimized_plan()?;
         render_explain(self, sql, &plan)
     }
 
-    fn build_session_context(&self) -> Result<SessionContext> {
+    async fn build_session_context(&self) -> Result<SessionContext> {
         let ctx = SessionContext::new();
 
         for (table_name, table) in &self.rest_tables {
@@ -165,6 +231,35 @@ impl Engine {
                 provider.clone(),
             ));
             register_table(&ctx, table_name, provider)?;
+        }
+
+        for source in &self.deferred_sources {
+            match source {
+                DeferredSource::Parquet { qualified, path } => {
+                    register_parquet(&ctx, qualified, path).await?;
+                }
+                DeferredSource::Excel { qualified, cfg } => {
+                    let batches = read_excel(cfg)?;
+                    register_memtable(&ctx, qualified, batches)?;
+                }
+                DeferredSource::Graphql {
+                    qualified,
+                    endpoint,
+                    auth,
+                    table,
+                } => {
+                    let batches = fetch_graphql(endpoint, auth.as_ref(), table).await?;
+                    register_memtable(&ctx, qualified, batches)?;
+                }
+                DeferredSource::Postgres {
+                    qualified,
+                    connection,
+                    relation,
+                } => {
+                    let batches = read_postgres(connection, relation).await?;
+                    register_memtable(&ctx, qualified, batches)?;
+                }
+            }
         }
 
         Ok(ctx)
@@ -247,6 +342,421 @@ fn ensure_schema(ctx: &SessionContext, catalog_name: &str, schema_name: &str) ->
     }
 
     Ok(())
+}
+
+// ----------------------------------------------------------------
+// Helpers for the four async / batch-materialised sources.
+// ----------------------------------------------------------------
+
+/// Register a Parquet file (or directory / glob of files) into the
+/// DataFusion `SessionContext` under the qualified name. v1 uses
+/// `read_parquet` + materialise into a `MemTable`. Streaming via
+/// `ListingTable` is a follow-up once we settle on a stable
+/// schema-discovery API across DataFusion versions.
+async fn register_parquet(ctx: &SessionContext, qualified: &str, path: &str) -> Result<()> {
+    use datafusion::prelude::ParquetReadOptions;
+
+    let df = ctx
+        .read_parquet(path, ParquetReadOptions::default())
+        .await
+        .map_err(DataFusionError::from)?;
+    let batches = df.collect().await.map_err(DataFusionError::from)?;
+    register_memtable(ctx, qualified, batches)
+}
+
+/// Materialise a list of `RecordBatch`es as a `MemTable` and register
+/// it. Used by Excel / GraphQL / Postgres sources whose v1 strategy is
+/// "fetch-and-cache" rather than streaming.
+fn register_memtable(
+    ctx: &SessionContext,
+    qualified: &str,
+    batches: Vec<RecordBatch>,
+) -> Result<()> {
+    if batches.is_empty() {
+        return Err(EngineError::NotYetImplemented(
+            "memtable source returned zero batches; an empty schema is not yet supported",
+        ));
+    }
+    let schema = batches[0].schema();
+    let provider = Arc::new(
+        datafusion::datasource::MemTable::try_new(schema, vec![batches])
+            .map_err(DataFusionError::from)?,
+    );
+    register_table(ctx, qualified, provider)
+}
+
+/// Read an Excel sheet into a single `RecordBatch`. v1 limitations:
+/// every column is typed as Utf8 (string). Type inference can be
+/// added later by sampling rows the same way `dbfy detect` does for
+/// CSV.
+fn read_excel(cfg: &dbfy_config::ExcelTableConfig) -> Result<Vec<RecordBatch>> {
+    use arrow_array::{ArrayRef, StringArray};
+    use arrow_schema::{Field, Schema};
+    use calamine::{Data, Reader, open_workbook_auto};
+
+    let mut workbook = open_workbook_auto(&cfg.path).map_err(|err| {
+        EngineError::NotYetImplemented(Box::leak(
+            format!("excel: open `{}` failed: {err}", cfg.path).into_boxed_str(),
+        ))
+    })?;
+    let sheet_name: String = match &cfg.sheet {
+        Some(name) => name.clone(),
+        None => workbook
+            .sheet_names()
+            .first()
+            .cloned()
+            .ok_or(EngineError::NotYetImplemented(
+                "excel: workbook has no sheets",
+            ))?,
+    };
+    let range = workbook.worksheet_range(&sheet_name).map_err(|err| {
+        EngineError::NotYetImplemented(Box::leak(
+            format!("excel: sheet `{sheet_name}` not found: {err}").into_boxed_str(),
+        ))
+    })?;
+
+    let mut rows = range.rows();
+    let header_names: Vec<String> = if cfg.has_header {
+        rows.next()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(i, cell)| match cell {
+                        Data::String(s) if !s.is_empty() => s.clone(),
+                        Data::Empty => format!("col_{i}"),
+                        other => other.to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        let first = rows.next();
+        let n = first.map(|r| r.len()).unwrap_or(0);
+        (0..n).map(|i| format!("col_{i}")).collect()
+    };
+
+    if header_names.is_empty() {
+        return Err(EngineError::NotYetImplemented("excel: empty sheet"));
+    }
+
+    let mut columns: Vec<Vec<Option<String>>> = vec![Vec::new(); header_names.len()];
+    if !cfg.has_header {
+        // We consumed the first row in `rows.next()` above; rewind
+        // by re-opening the range so that row participates in the
+        // data set.
+        rows = range.rows();
+    }
+    for row in rows {
+        for (i, cell) in row.iter().enumerate().take(header_names.len()) {
+            let s = match cell {
+                Data::Empty => None,
+                Data::String(s) => Some(s.clone()),
+                Data::Int(n) => Some(n.to_string()),
+                Data::Float(n) => Some(n.to_string()),
+                Data::Bool(b) => Some(b.to_string()),
+                Data::DateTime(dt) => Some(dt.to_string()),
+                Data::Error(e) => Some(format!("#ERROR:{e:?}")),
+                Data::DurationIso(s) | Data::DateTimeIso(s) => Some(s.clone()),
+            };
+            columns[i].push(s);
+        }
+        // Pad short rows with None so all columns stay the same length.
+        for col in columns.iter_mut().skip(row.len()) {
+            col.push(None);
+        }
+    }
+
+    let fields: Vec<Field> = header_names
+        .iter()
+        .map(|name| Field::new(name, arrow_schema::DataType::Utf8, true))
+        .collect();
+    let arrays: Vec<ArrayRef> = columns
+        .into_iter()
+        .map(|col| {
+            let strs: Vec<Option<&str>> = col.iter().map(|s| s.as_deref()).collect();
+            Arc::new(StringArray::from(strs)) as ArrayRef
+        })
+        .collect();
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema, arrays).map_err(|err| {
+        EngineError::NotYetImplemented(Box::leak(
+            format!("excel: build batch: {err}").into_boxed_str(),
+        ))
+    })?;
+    Ok(vec![batch])
+}
+
+/// Fetch a GraphQL query and convert its JSON response to a single
+/// `RecordBatch`. Reuses the REST provider's column-config + JSONPath
+/// extraction by going through the in-memory translation.
+async fn fetch_graphql(
+    endpoint: &str,
+    auth: Option<&dbfy_config::AuthConfig>,
+    table: &dbfy_config::GraphqlTableConfig,
+) -> Result<Vec<RecordBatch>> {
+    use serde_json::json;
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!(
+            "dbfy/",
+            env!("CARGO_PKG_VERSION"),
+            " (+https://github.com/frhack/dbfy)"
+        ))
+        .build()
+        .map_err(|err| {
+            EngineError::NotYetImplemented(Box::leak(
+                format!("graphql: build client: {err}").into_boxed_str(),
+            ))
+        })?;
+
+    let mut request = client.post(endpoint).json(&json!({ "query": table.query }));
+    if let Some(auth_cfg) = auth {
+        match auth_cfg {
+            dbfy_config::AuthConfig::Bearer { token_env } => {
+                let token = std::env::var(token_env).map_err(|_| {
+                    EngineError::NotYetImplemented(Box::leak(
+                        format!("graphql: env var `{token_env}` not set").into_boxed_str(),
+                    ))
+                })?;
+                request = request.bearer_auth(token);
+            }
+            dbfy_config::AuthConfig::None => {}
+            _ => {
+                return Err(EngineError::NotYetImplemented(
+                    "graphql: only `none` and `bearer` auth are supported in v1",
+                ));
+            }
+        }
+    }
+    let response = request.send().await.map_err(|err| {
+        EngineError::NotYetImplemented(Box::leak(
+            format!("graphql: HTTP failure: {err}").into_boxed_str(),
+        ))
+    })?;
+    let body: serde_json::Value = response.json().await.map_err(|err| {
+        EngineError::NotYetImplemented(Box::leak(
+            format!("graphql: response was not JSON: {err}").into_boxed_str(),
+        ))
+    })?;
+
+    // Use serde_json_path to evaluate the root JSONPath.
+    let root_path = serde_json_path::JsonPath::parse(&table.root).map_err(|err| {
+        EngineError::NotYetImplemented(Box::leak(
+            format!("graphql: invalid root path `{}`: {err}", table.root).into_boxed_str(),
+        ))
+    })?;
+    let nodes = root_path.query(&body);
+    let rows: Vec<&serde_json::Value> = nodes.iter().copied().collect();
+
+    json_rows_to_batch(&rows, &table.columns)
+}
+
+/// Read a Postgres relation into RecordBatches. v1 strategy:
+/// `SELECT * FROM <relation>`, fetch all rows, convert via the
+/// pg-row-to-arrow shim. Filter / projection / limit pushdown is
+/// future work.
+async fn read_postgres(connection: &str, relation: &str) -> Result<Vec<RecordBatch>> {
+    use tokio_postgres::NoTls;
+
+    let (client, conn) = tokio_postgres::connect(connection, NoTls)
+        .await
+        .map_err(|err| {
+            EngineError::NotYetImplemented(Box::leak(
+                format!("postgres: connect failed: {err}").into_boxed_str(),
+            ))
+        })?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let sql = format!("SELECT * FROM {relation}");
+    let rows = client.query(sql.as_str(), &[]).await.map_err(|err| {
+        EngineError::NotYetImplemented(Box::leak(
+            format!("postgres: query `{sql}` failed: {err}").into_boxed_str(),
+        ))
+    })?;
+
+    if rows.is_empty() {
+        return Err(EngineError::NotYetImplemented(
+            "postgres: empty result; v1 needs at least one row to infer schema",
+        ));
+    }
+    pg_rows_to_batch(&rows)
+}
+
+/// Convert a list of JSON value references to a `RecordBatch` using
+/// the `ColumnConfig` JSONPath/type pairs the user declared in YAML.
+/// Mirrors what `dbfy-provider-rest` does for REST sources but for an
+/// already-materialised JSON tree.
+fn json_rows_to_batch(
+    rows: &[&serde_json::Value],
+    columns: &BTreeMap<String, dbfy_config::ColumnConfig>,
+) -> Result<Vec<RecordBatch>> {
+    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
+    use arrow_schema::{DataType as ArrowDataType, Field, Schema};
+
+    if columns.is_empty() {
+        return Err(EngineError::NotYetImplemented(
+            "graphql: at least one column must be declared",
+        ));
+    }
+
+    let mut col_paths: Vec<(
+        &String,
+        &dbfy_config::ColumnConfig,
+        serde_json_path::JsonPath,
+    )> = Vec::new();
+    for (name, cfg) in columns {
+        let path = serde_json_path::JsonPath::parse(&cfg.path).map_err(|err| {
+            EngineError::NotYetImplemented(Box::leak(
+                format!("graphql: invalid column path `{}`: {err}", cfg.path).into_boxed_str(),
+            ))
+        })?;
+        col_paths.push((name, cfg, path));
+    }
+
+    let n_rows = rows.len();
+    let fields: Vec<Field> = col_paths
+        .iter()
+        .map(|(name, cfg, _)| {
+            let dt = match cfg.r#type {
+                dbfy_config::DataType::Boolean => ArrowDataType::Boolean,
+                dbfy_config::DataType::Int64 => ArrowDataType::Int64,
+                dbfy_config::DataType::Float64 => ArrowDataType::Float64,
+                _ => ArrowDataType::Utf8,
+            };
+            Field::new(name.as_str(), dt, true)
+        })
+        .collect();
+
+    let mut arrays: Vec<ArrayRef> = Vec::new();
+    for (_, cfg, path) in &col_paths {
+        match cfg.r#type {
+            dbfy_config::DataType::Boolean => {
+                let vals: Vec<Option<bool>> = rows
+                    .iter()
+                    .map(|row| path.query(row).first().and_then(|v| v.as_bool()))
+                    .collect();
+                arrays.push(Arc::new(BooleanArray::from(vals)));
+            }
+            dbfy_config::DataType::Int64 => {
+                let vals: Vec<Option<i64>> = rows
+                    .iter()
+                    .map(|row| path.query(row).first().and_then(|v| v.as_i64()))
+                    .collect();
+                arrays.push(Arc::new(Int64Array::from(vals)));
+            }
+            dbfy_config::DataType::Float64 => {
+                let vals: Vec<Option<f64>> = rows
+                    .iter()
+                    .map(|row| path.query(row).first().and_then(|v| v.as_f64()))
+                    .collect();
+                arrays.push(Arc::new(Float64Array::from(vals)));
+            }
+            _ => {
+                let vals: Vec<Option<String>> = rows
+                    .iter()
+                    .map(|row| {
+                        path.query(row).first().map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                    })
+                    .collect();
+                let strs: Vec<Option<&str>> = vals.iter().map(|s| s.as_deref()).collect();
+                arrays.push(Arc::new(StringArray::from(strs)));
+            }
+        }
+    }
+    let _ = n_rows;
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema, arrays).map_err(|err| {
+        EngineError::NotYetImplemented(Box::leak(
+            format!("graphql: build batch: {err}").into_boxed_str(),
+        ))
+    })?;
+    Ok(vec![batch])
+}
+
+/// Convert tokio-postgres rows to a single `RecordBatch`. v1 type
+/// coverage: text + int4 + int8 + float4 + float8 + bool. Anything
+/// else is rendered as a debug string. This is intentionally narrow;
+/// proper Arrow type mapping (numeric / json / array / timestamp) is
+/// future work.
+fn pg_rows_to_batch(rows: &[tokio_postgres::Row]) -> Result<Vec<RecordBatch>> {
+    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
+    use arrow_schema::{DataType as ArrowDataType, Field, Schema};
+    use tokio_postgres::types::Type as PgType;
+
+    let row0 = &rows[0];
+    let cols = row0.columns();
+
+    let mut fields: Vec<Field> = Vec::with_capacity(cols.len());
+    for col in cols {
+        let dt = match *col.type_() {
+            PgType::BOOL => ArrowDataType::Boolean,
+            PgType::INT2 | PgType::INT4 | PgType::INT8 => ArrowDataType::Int64,
+            PgType::FLOAT4 | PgType::FLOAT8 => ArrowDataType::Float64,
+            _ => ArrowDataType::Utf8,
+        };
+        fields.push(Field::new(col.name(), dt, true));
+    }
+
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(cols.len());
+    for (i, col) in cols.iter().enumerate() {
+        match *col.type_() {
+            PgType::BOOL => {
+                let vals: Vec<Option<bool>> = rows.iter().map(|r| r.try_get(i).ok()).collect();
+                arrays.push(Arc::new(BooleanArray::from(vals)));
+            }
+            PgType::INT2 => {
+                let vals: Vec<Option<i64>> = rows
+                    .iter()
+                    .map(|r| r.try_get::<_, i16>(i).ok().map(|v| v as i64))
+                    .collect();
+                arrays.push(Arc::new(Int64Array::from(vals)));
+            }
+            PgType::INT4 => {
+                let vals: Vec<Option<i64>> = rows
+                    .iter()
+                    .map(|r| r.try_get::<_, i32>(i).ok().map(|v| v as i64))
+                    .collect();
+                arrays.push(Arc::new(Int64Array::from(vals)));
+            }
+            PgType::INT8 => {
+                let vals: Vec<Option<i64>> =
+                    rows.iter().map(|r| r.try_get::<_, i64>(i).ok()).collect();
+                arrays.push(Arc::new(Int64Array::from(vals)));
+            }
+            PgType::FLOAT4 => {
+                let vals: Vec<Option<f64>> = rows
+                    .iter()
+                    .map(|r| r.try_get::<_, f32>(i).ok().map(|v| v as f64))
+                    .collect();
+                arrays.push(Arc::new(Float64Array::from(vals)));
+            }
+            PgType::FLOAT8 => {
+                let vals: Vec<Option<f64>> =
+                    rows.iter().map(|r| r.try_get::<_, f64>(i).ok()).collect();
+                arrays.push(Arc::new(Float64Array::from(vals)));
+            }
+            _ => {
+                let vals: Vec<Option<String>> = rows
+                    .iter()
+                    .map(|r| r.try_get::<_, String>(i).ok())
+                    .collect();
+                let strs: Vec<Option<&str>> = vals.iter().map(|s| s.as_deref()).collect();
+                arrays.push(Arc::new(StringArray::from(strs)));
+            }
+        }
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema, arrays).map_err(|err| {
+        EngineError::NotYetImplemented(Box::leak(
+            format!("postgres: build batch: {err}").into_boxed_str(),
+        ))
+    })?;
+    Ok(vec![batch])
 }
 
 #[derive(Debug)]
@@ -2186,5 +2696,182 @@ sources:
             .unwrap();
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 10);
+    }
+
+    #[tokio::test]
+    async fn parquet_source_round_trips() {
+        // Write a small parquet file via DataFusion, then read it
+        // back through dbfy's `parquet` source kind.
+        use datafusion::dataframe::DataFrameWriteOptions;
+        use datafusion::execution::context::SessionContext as DfSessionContext;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let parquet_path = dir.path().join("items.parquet");
+
+        let writer_ctx = DfSessionContext::new();
+        let df = writer_ctx
+            .sql("SELECT * FROM (VALUES (1, 'mario'), (2, 'anna'), (3, 'luca')) AS t(id, name)")
+            .await
+            .expect("writer SQL");
+        df.write_parquet(
+            parquet_path.to_str().unwrap(),
+            DataFrameWriteOptions::default(),
+            None,
+        )
+        .await
+        .expect("write parquet");
+
+        let yaml = format!(
+            r#"
+version: 1
+sources:
+  data:
+    type: parquet
+    tables:
+      items:
+        path: "{}"
+"#,
+            parquet_path.display()
+        );
+        let config = Config::from_yaml_str(&yaml).expect("config parses");
+        let engine = Engine::from_config(config).expect("engine builds");
+        let batches = engine
+            .query("SELECT count(*) FROM data.items")
+            .await
+            .expect("count over parquet");
+        let total: i64 = batches
+            .iter()
+            .filter_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .map(|a| a.value(0))
+            })
+            .sum();
+        assert_eq!(total, 3);
+    }
+
+    #[tokio::test]
+    async fn graphql_source_against_wiremock() {
+        // Mock a GraphQL endpoint that returns a fixed JSON body and
+        // verify dbfy POSTs the configured query and root-extracts
+        // the response correctly.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "users": [
+                        {"login": "mario", "stars": 100},
+                        {"login": "anna",  "stars":  42},
+                        {"login": "luca",  "stars":  73}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let yaml = format!(
+            r#"
+version: 1
+sources:
+  gh:
+    type: graphql
+    endpoint: "{server}/graphql"
+    tables:
+      users:
+        query: "{{ users {{ login stars }} }}"
+        root: "$.data.users[*]"
+        columns:
+          login: {{ path: "$.login", type: string }}
+          stars: {{ path: "$.stars", type: int64 }}
+"#,
+            server = server.uri(),
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("config parses");
+        let engine = Engine::from_config(config).expect("engine builds");
+        let batches = engine
+            .query("SELECT login FROM gh.users WHERE stars > 50 ORDER BY login")
+            .await
+            .expect("graphql query");
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 2, "should match mario + luca");
+    }
+
+    #[test]
+    fn parquet_config_round_trips_through_yaml() {
+        let yaml = r#"
+version: 1
+sources:
+  warehouse:
+    type: parquet
+    tables:
+      orders:
+        path: /data/orders/*.parquet
+      products:
+        path: /data/products.parquet
+"#;
+        let config = Config::from_yaml_str(yaml).expect("parses");
+        match config.sources.get("warehouse").unwrap() {
+            dbfy_config::SourceConfig::Parquet(p) => {
+                assert_eq!(p.tables.len(), 2);
+                assert!(p.tables.contains_key("orders"));
+                assert!(p.tables.contains_key("products"));
+            }
+            _ => panic!("expected parquet source"),
+        }
+    }
+
+    #[test]
+    fn excel_config_round_trips_through_yaml() {
+        let yaml = r#"
+version: 1
+sources:
+  finance:
+    type: excel
+    tables:
+      q1:
+        path: /reports/q1.xlsx
+        sheet: Revenue
+        has_header: true
+      q2:
+        path: /reports/q2.xlsx
+"#;
+        let config = Config::from_yaml_str(yaml).expect("parses");
+        match config.sources.get("finance").unwrap() {
+            dbfy_config::SourceConfig::Excel(e) => {
+                assert_eq!(e.tables.len(), 2);
+                assert_eq!(e.tables["q1"].sheet.as_deref(), Some("Revenue"));
+                assert!(e.tables["q1"].has_header);
+                assert!(e.tables["q2"].sheet.is_none());
+            }
+            _ => panic!("expected excel source"),
+        }
+    }
+
+    #[test]
+    fn postgres_config_round_trips_through_yaml() {
+        let yaml = r#"
+version: 1
+sources:
+  prod_db:
+    type: postgres
+    connection: "postgres://reader:secret@host:5432/app"
+    tables:
+      users:
+        relation: public.users
+      orders:
+        relation: orders
+"#;
+        let config = Config::from_yaml_str(yaml).expect("parses");
+        match config.sources.get("prod_db").unwrap() {
+            dbfy_config::SourceConfig::Postgres(pg) => {
+                assert_eq!(pg.tables.len(), 2);
+                assert_eq!(pg.tables["users"].relation, "public.users");
+            }
+            _ => panic!("expected postgres source"),
+        }
     }
 }
