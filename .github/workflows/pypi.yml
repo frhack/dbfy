@@ -23,9 +23,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # macOS x86_64 wheel intentionally omitted — see release.yml.
+        # Intel-Mac users can install via `pip install dbfy --no-binary
+        # dbfy` (sdist build) which compiles locally.
         include:
           - { runner: ubuntu-latest, target: x86_64,  manylinux: 'auto' }
-          - { runner: macos-13,      target: x86_64,  manylinux: '' }
           - { runner: macos-14,      target: aarch64, manylinux: '' }
     runs-on: ${{ matrix.runner }}
     steps:

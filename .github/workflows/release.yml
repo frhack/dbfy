@@ -15,9 +15,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # macOS x86_64 (Intel) intentionally omitted — the macos-13
+        # runner pool on the GitHub-hosted free tier has indefinite
+        # queue times. Intel-Mac users can `cargo install --git
+        # https://github.com/frhack/dbfy dbfy-cli` from source.
         include:
           - { runner: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
-          - { runner: macos-13,       target: x86_64-apple-darwin }
           - { runner: macos-14,       target: aarch64-apple-darwin }
     runs-on: ${{ matrix.runner }}
     steps:
@@ -45,9 +48,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # See note in build-cli: macOS x86_64 omitted due to runner
+        # availability. The .duckdb_extension is compiled against the
+        # bundled DuckDB sources, so all target architectures are
+        # produced from the same static-link path; Intel-Mac users on
+        # x86_64 DuckDB can build locally with
+        #   cargo build -p dbfy-frontend-duckdb --features loadable_extension --release
         include:
           - { runner: ubuntu-latest,  target: x86_64-unknown-linux-gnu, lib: libdbfy_duckdb.so }
-          - { runner: macos-13,       target: x86_64-apple-darwin,     lib: libdbfy_duckdb.dylib }
           - { runner: macos-14,       target: aarch64-apple-darwin,    lib: libdbfy_duckdb.dylib }
     runs-on: ${{ matrix.runner }}
     steps:
