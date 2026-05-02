@@ -109,6 +109,32 @@ internal static class Native
         [MarshalAs(UnmanagedType.LPUTF8Str)] string sql,
         out IntPtr outResult);
 
+    /// <summary>
+    /// Async-query entry point. The native side spawns the query on
+    /// its tokio runtime and invokes the callback exactly once when
+    /// the query terminates. The callback runs on a tokio worker
+    /// thread — managed continuations must use
+    /// <c>TaskCreationOptions.RunContinuationsAsynchronously</c> to
+    /// avoid running user code there.
+    /// </summary>
+    /// <param name="engine">Engine handle.</param>
+    /// <param name="sql">UTF-8 SQL query.</param>
+    /// <param name="callback">Native function pointer to a static
+    /// <c>[UnmanagedCallersOnly]</c> stub. Signature:
+    /// <c>void(void* userData, DbfyResult* result, const char* errorMsg)</c>.
+    /// On success, <paramref name="result"/> is non-null and the caller
+    /// must release it via <see cref="dbfy_result_free"/>; on failure,
+    /// <paramref name="result"/> is null and <paramref name="errorMsg"/>
+    /// points to a UTF-8 string valid only until the callback returns.</param>
+    /// <param name="userData">Opaque pointer round-tripped to the
+    /// callback. Bindings stash a pinned <see cref="GCHandle"/> here.</param>
+    [DllImport(LibraryName, EntryPoint = "dbfy_engine_query_async_v1")]
+    internal static extern unsafe int dbfy_engine_query_async_v1(
+        IntPtr engine,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string sql,
+        delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, void> callback,
+        IntPtr userData);
+
     [DllImport(LibraryName, EntryPoint = "dbfy_result_batch_count")]
     internal static extern UIntPtr dbfy_result_batch_count(IntPtr result);
 

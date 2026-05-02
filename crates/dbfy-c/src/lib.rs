@@ -8,7 +8,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 use std::sync::Arc;
 
@@ -45,7 +45,12 @@ pub extern "C" fn dbfy_last_error() -> *const c_char {
 
 /// Opaque handle for an engine instance.
 pub struct DbfyEngine {
-    inner: Engine,
+    /// Wrapped in `Arc` so the async entry point can clone a handle
+    /// into the tokio task it spawns without holding a borrow on the
+    /// caller's `*const DbfyEngine` (which has no enforceable lifetime
+    /// across an FFI boundary). Sync entry points still call through
+    /// the `Arc` via deref — no measurable overhead.
+    inner: Arc<Engine>,
     runtime: Arc<Runtime>,
 }
 
@@ -109,7 +114,7 @@ pub extern "C" fn dbfy_engine_new_empty() -> *mut DbfyEngine {
         }
     };
     Box::into_raw(Box::new(DbfyEngine {
-        inner: Engine::default(),
+        inner: Arc::new(Engine::default()),
         runtime,
     }))
 }
@@ -130,7 +135,7 @@ fn build_engine(engine: Result<Engine, dbfy_frontend_datafusion::EngineError>) -
         }
     };
     Box::into_raw(Box::new(DbfyEngine {
-        inner: engine,
+        inner: Arc::new(engine),
         runtime,
     }))
 }
@@ -202,6 +207,81 @@ pub extern "C" fn dbfy_engine_query(
             -1
         }
     }
+}
+
+// ----------------------------------------------------------------
+// Async query — non-blocking entry point.
+//
+// The native side spawns the query on the engine's tokio runtime and
+// invokes `callback` exactly once on completion, with either
+// `(result, NULL)` for success or `(NULL, error_msg)` for failure.
+// The error string remains valid only until the callback returns —
+// callers must copy it synchronously.
+//
+// On success the result handle is owned by the caller; release it
+// with `dbfy_result_free`. The `user_data` pointer is opaque to the
+// native side; bindings typically stash a pinned managed object's
+// handle there (a GCHandle in C#, a global ref in JNI) and use the
+// callback to bridge into a Task / CompletableFuture / Future.
+// ----------------------------------------------------------------
+
+/// Callback signature for `dbfy_engine_query_async_v1`. See the
+/// function's docs for the ownership / lifetime contract.
+pub type DbfyQueryCallback =
+    unsafe extern "C" fn(user_data: *mut c_void, result: *mut DbfyResult, error_msg: *const c_char);
+
+/// Wrapper that lets us send an opaque `*mut c_void` across a tokio
+/// task boundary. Bindings are responsible for pointing this at
+/// thread-safe storage; we treat it as opaque.
+struct UserDataPtr(*mut c_void);
+unsafe impl Send for UserDataPtr {}
+
+/// Execute SQL asynchronously. Returns 0 if the task was successfully
+/// spawned, -1 if input validation failed (use `dbfy_last_error`).
+///
+/// On completion (either success or failure), `callback(user_data, result, error_msg)`
+/// is invoked exactly once. The callback runs on a tokio worker
+/// thread; bindings must marshal back to their preferred execution
+/// context if needed (e.g. C# uses `TaskCreationOptions.RunContinuationsAsynchronously`).
+#[unsafe(no_mangle)]
+pub extern "C" fn dbfy_engine_query_async_v1(
+    engine: *const DbfyEngine,
+    sql: *const c_char,
+    callback: DbfyQueryCallback,
+    user_data: *mut c_void,
+) -> i32 {
+    if engine.is_null() || sql.is_null() {
+        set_last_error("null pointer");
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    let sql_owned = match unsafe { CStr::from_ptr(sql) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let inner = engine.inner.clone();
+    let ud = UserDataPtr(user_data);
+    engine.runtime.spawn(async move {
+        let ud = ud;
+        match inner.query(&sql_owned).await {
+            Ok(batches) => {
+                let boxed = Box::into_raw(Box::new(DbfyResult { batches }));
+                unsafe { callback(ud.0, boxed, ptr::null()) };
+            }
+            Err(err) => {
+                let msg = err.to_string().replace('\0', "?");
+                let cmsg = CString::new(msg).unwrap_or_else(|_| CString::new("error").unwrap());
+                unsafe { callback(ud.0, ptr::null_mut(), cmsg.as_ptr()) };
+                // `cmsg` drops here, after the callback has had a
+                // chance to copy the bytes.
+                drop(cmsg);
+            }
+        }
+    });
+    0
 }
 
 /// Number of record batches in a result, or 0 if `result` is NULL.

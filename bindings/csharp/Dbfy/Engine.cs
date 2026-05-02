@@ -5,7 +5,10 @@
 // is the dbfy_last_error string, e.g. "config load: invalid root path").
 
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Dbfy;
 
@@ -88,6 +91,118 @@ public sealed class Engine : IDisposable
             throw DbfyException.FromLastError("Engine.Query");
         }
         return new Result(resultHandle);
+    }
+
+    /// <summary>
+    /// Run <paramref name="sql"/> asynchronously. The native engine's
+    /// tokio runtime drives the query (so the call returns immediately)
+    /// and a managed continuation is woken when the query terminates.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Continuations on the returned <see cref="Task{TResult}"/> are
+    /// scheduled with <c>RunContinuationsAsynchronously</c> so they do
+    /// <i>not</i> run inline on a tokio worker thread — managed code
+    /// always observes the result back on a thread-pool thread (or
+    /// the captured <see cref="SynchronizationContext"/> if any).
+    /// </para>
+    /// <para>
+    /// Cancellation: if <paramref name="cancellationToken"/> fires before
+    /// the native side delivers a result, the returned Task transitions
+    /// to <see cref="TaskStatus.Canceled"/>. The native query may still
+    /// run to completion — there is no native cancellation token in
+    /// the v1 ABI yet — but the managed Result, if it lands afterwards,
+    /// is freed inside the callback so no leak occurs.
+    /// </para>
+    /// </remarks>
+    public Task<Result> QueryAsync(string sql, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sql);
+        ThrowIfDisposed();
+
+        var tcs = new TaskCompletionSource<Result>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Pin a strong reference to the TCS so the GC can't move /
+        // collect it before the native callback fires. The handle is
+        // released in `OnQueryComplete` (success / failure) or in the
+        // cancellation branch below.
+        var gcHandle = GCHandle.Alloc(tcs);
+
+        if (cancellationToken.CanBeCanceled)
+        {
+            // Pre-check + registration: if cancellation lands first,
+            // synthesise a cancelled Task and let the native callback
+            // run into a no-op (we mark the TCS, which is idempotent
+            // via TrySetResult / TrySetException).
+            cancellationToken.Register(() =>
+            {
+                tcs.TrySetCanceled(cancellationToken);
+            });
+        }
+
+        unsafe
+        {
+            int rc;
+            try
+            {
+                rc = Native.dbfy_engine_query_async_v1(
+                    _handle,
+                    sql,
+                    &OnQueryComplete,
+                    GCHandle.ToIntPtr(gcHandle));
+            }
+            catch
+            {
+                // P/Invoke marshalling failure — release the GCHandle
+                // before propagating, otherwise we leak the TCS pin.
+                gcHandle.Free();
+                throw;
+            }
+            if (rc != 0)
+            {
+                gcHandle.Free();
+                throw DbfyException.FromLastError("Engine.QueryAsync");
+            }
+        }
+
+        return tcs.Task;
+    }
+
+    /// <summary>
+    /// Native callback invoked exactly once per <see cref="QueryAsync"/>
+    /// call. Translates the (result handle, error string) pair into a
+    /// <see cref="TaskCompletionSource{TResult}"/> outcome.
+    /// </summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void OnQueryComplete(IntPtr userData, IntPtr resultHandle, IntPtr errorMsg)
+    {
+        var gcHandle = GCHandle.FromIntPtr(userData);
+        try
+        {
+            var tcs = (TaskCompletionSource<Result>)gcHandle.Target!;
+            if (resultHandle != IntPtr.Zero)
+            {
+                var result = new Result(resultHandle);
+                if (!tcs.TrySetResult(result))
+                {
+                    // The TCS was already cancelled — drop the result
+                    // so we don't leak the native handle.
+                    result.Dispose();
+                }
+            }
+            else
+            {
+                var msg = errorMsg == IntPtr.Zero
+                    ? "<unknown error>"
+                    : Marshal.PtrToStringUTF8(errorMsg) ?? "<unknown error>";
+                tcs.TrySetException(new DbfyException("Engine.QueryAsync", msg));
+            }
+        }
+        finally
+        {
+            gcHandle.Free();
+        }
     }
 
     /// <summary>

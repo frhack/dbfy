@@ -24,6 +24,12 @@ typedef struct DbfyEngine DbfyEngine;
  */
 typedef struct DbfyResult DbfyResult;
 
+/**
+ * Callback signature for `dbfy_engine_query_async_v1`. See the
+ * function's docs for the ownership / lifetime contract.
+ */
+typedef void (*DbfyQueryCallback)(void *user_data, struct DbfyResult *result, const char *error_msg);
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -75,6 +81,20 @@ void dbfy_string_free(char *s);
 int32_t dbfy_engine_query(const struct DbfyEngine *engine,
                           const char *sql,
                           struct DbfyResult **out_result);
+
+/**
+ * Execute SQL asynchronously. Returns 0 if the task was successfully
+ * spawned, -1 if input validation failed (use `dbfy_last_error`).
+ *
+ * On completion (either success or failure), `callback(user_data, result, error_msg)`
+ * is invoked exactly once. The callback runs on a tokio worker
+ * thread; bindings must marshal back to their preferred execution
+ * context if needed (e.g. C# uses `TaskCreationOptions.RunContinuationsAsynchronously`).
+ */
+int32_t dbfy_engine_query_async_v1(const struct DbfyEngine *engine,
+                                   const char *sql,
+                                   DbfyQueryCallback callback,
+                                   void *user_data);
 
 /**
  * Number of record batches in a result, or 0 if `result` is NULL.

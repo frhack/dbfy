@@ -59,4 +59,42 @@ public class EngineTests
         Assert.Contains("Engine.Query", ex.Operation);
         Assert.NotEmpty(ex.Message);
     }
+
+    [Fact]
+    public async Task QueryAsyncDeliversErrorViaTask()
+    {
+        // The async path must surface native errors as DbfyException
+        // through the Task — never as a synchronous throw on the
+        // calling thread (which would defeat the point of async).
+        using var engine = Engine.NewEmpty();
+        var task = engine.QueryAsync("SELECT * FROM nonexistent_table");
+        var ex = await Assert.ThrowsAsync<DbfyException>(() => task);
+        Assert.NotEmpty(ex.Message);
+    }
+
+    [Fact]
+    public async Task QueryAsyncCompletesOffTokioThread()
+    {
+        // The TCS is constructed with RunContinuationsAsynchronously
+        // so the await continuation must not run on a tokio worker.
+        // We can't directly inspect tokio thread names, but we can
+        // assert the continuation runs on a managed thread-pool
+        // thread (IsThreadPoolThread = true), which is what the .NET
+        // scheduler hands us when there's no SyncContext.
+        using var engine = Engine.NewEmpty();
+        try
+        {
+            await engine.QueryAsync("SELECT 1");
+        }
+        catch (DbfyException)
+        {
+            // No tables registered, so the query may legitimately
+            // fail. The thread-pool assertion below is what we care
+            // about — we got past the await without deadlock.
+        }
+        Assert.True(
+            Thread.CurrentThread.IsThreadPoolThread
+                || SynchronizationContext.Current != null,
+            "await continuation must run on a managed scheduler, not a tokio worker");
+    }
 }
