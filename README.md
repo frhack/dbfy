@@ -69,8 +69,9 @@ cargo build --release -p dbfy-cli
 | **Excel** (`.xlsx` / `.xls`) | ✅ stable | sheet selection, **predicate + projection + limit pushdown applied at row-iteration time** (skip-on-read, no full materialisation) |
 | **GraphQL** | ✅ stable | POST + bearer auth, JSONPath root extraction, **variables pushdown** via `pushdown.variables` mapping (`WHERE col = lit` → GraphQL variable) |
 | **PostgreSQL** | ✅ stable | read-only `SELECT` over the wire — **filter + projection + limit pushdown** translated into native `WHERE / SELECT / LIMIT` so the Postgres planner can use indexes |
+| **LDAP / LDAPS** | ✅ stable | anonymous + simple bind, base / one / sub scope, **filter pushdown** that AND-merges SQL `WHERE` predicates into native LDAP filter syntax (`(&(uid=mario)(objectClass=person))`) with RFC 4515 value escaping; multi-valued attributes joined; synthetic `__dn__` column exposes entry DN |
 | **In-memory programmatic** | ✅ stable | static Arrow `RecordBatch` provider · Python-defined custom providers via Arrow C Data Interface |
-| **Coming next** | 🟡 wishlist — [vote with an issue](https://github.com/frhack/dbfy/issues?q=is%3Aissue+label%3Asource-request) | MySQL · gRPC · Parquet remote (S3/GCS) · Kafka · MongoDB · Loki / Prometheus · LDAP · HTML / DOM scraping |
+| **Coming next** | 🟡 wishlist — [vote with an issue](https://github.com/frhack/dbfy/issues?q=is%3Aissue+label%3Asource-request) | MySQL · gRPC · Parquet remote (S3/GCS) · Kafka · MongoDB · Loki / Prometheus · HTML / DOM scraping |
 
 ## Layout
 

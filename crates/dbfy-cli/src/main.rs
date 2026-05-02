@@ -331,6 +331,7 @@ fn validate(config: PathBuf) -> Result<()> {
             dbfy_config::SourceConfig::Excel(e) => e.tables.len(),
             dbfy_config::SourceConfig::Graphql(g) => g.tables.len(),
             dbfy_config::SourceConfig::Postgres(pg) => pg.tables.len(),
+            dbfy_config::SourceConfig::Ldap(ldap) => ldap.tables.len(),
         })
         .sum::<usize>();
 

@@ -74,6 +74,7 @@ pub enum SourceConfig {
     Excel(ExcelSourceConfig),
     Graphql(GraphqlSourceConfig),
     Postgres(PostgresSourceConfig),
+    Ldap(LdapSourceConfig),
 }
 
 impl SourceConfig {
@@ -85,6 +86,7 @@ impl SourceConfig {
             Self::Excel(e) => e.validate(source_name),
             Self::Graphql(g) => g.validate(source_name),
             Self::Postgres(pg) => pg.validate(source_name),
+            Self::Ldap(ldap) => ldap.validate(source_name),
         }
     }
 }
@@ -292,6 +294,176 @@ pub struct PostgresTableConfig {
     /// Schema-qualified table name (`public.users`) or unqualified
     /// (`users`). Used as `SELECT … FROM <relation>`.
     pub relation: String,
+}
+
+// ---------------------------------------------------------------
+// LDAP source — directory server queried via the LDAP wire protocol.
+// Each declared table is `(base_dn, scope, filter, attributes)`. The
+// `pushdown.attributes` mapping translates SQL `WHERE col <op> lit`
+// into native LDAP filter expressions, AND-merged into the table's
+// base filter so the directory server does the work, not us.
+// ---------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LdapSourceConfig {
+    /// LDAP URL: `ldap://host:389` or `ldaps://host:636`.
+    pub url: String,
+    #[serde(default)]
+    pub auth: Option<LdapAuthConfig>,
+    pub tables: BTreeMap<String, LdapTableConfig>,
+}
+
+impl LdapSourceConfig {
+    fn validate(&self, source_name: &str) -> Result<()> {
+        if self.url.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "source `{source_name}` requires a non-empty url"
+            )));
+        }
+        if !(self.url.starts_with("ldap://") || self.url.starts_with("ldaps://")) {
+            return Err(ConfigError::Validation(format!(
+                "source `{source_name}` url must start with ldap:// or ldaps://"
+            )));
+        }
+        if let Some(auth) = &self.auth {
+            auth.validate(source_name)?;
+        }
+        if self.tables.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "source `{source_name}` must define at least one table"
+            )));
+        }
+        for (table_name, table) in &self.tables {
+            if table_name.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "source `{source_name}` contains an empty table name"
+                )));
+            }
+            table.validate(source_name, table_name)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LdapAuthConfig {
+    /// Anonymous bind. No DN, no password.
+    Anonymous,
+    /// Simple bind with a DN + password from env.
+    Simple {
+        bind_dn: String,
+        password_env: String,
+    },
+}
+
+impl LdapAuthConfig {
+    fn validate(&self, source_name: &str) -> Result<()> {
+        match self {
+            Self::Anonymous => Ok(()),
+            Self::Simple {
+                bind_dn,
+                password_env,
+            } => {
+                if bind_dn.trim().is_empty() || password_env.trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "source `{source_name}` simple auth requires non-empty bind_dn and password_env"
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LdapTableConfig {
+    /// Search root, e.g. `ou=people,dc=example,dc=com`.
+    pub base_dn: String,
+    /// Search scope. Defaults to `sub` (entire subtree).
+    #[serde(default)]
+    pub scope: Option<LdapScope>,
+    /// Base LDAP filter, e.g. `(objectClass=inetOrgPerson)`. Defaults
+    /// to `(objectClass=*)`. Pushed-down predicates are AND-merged
+    /// into this filter at scan time.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Column → attribute mapping. Special LDAP-attribute name
+    /// `__dn__` exposes the entry's distinguished name.
+    pub attributes: BTreeMap<String, LdapAttributeConfig>,
+    #[serde(default)]
+    pub pushdown: Option<LdapPushdownConfig>,
+}
+
+impl LdapTableConfig {
+    fn validate(&self, source_name: &str, table_name: &str) -> Result<()> {
+        if self.base_dn.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "table `{source_name}.{table_name}` requires a non-empty base_dn"
+            )));
+        }
+        if self.attributes.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "table `{source_name}.{table_name}` must declare at least one attribute"
+            )));
+        }
+        for (col, cfg) in &self.attributes {
+            if col.trim().is_empty() || cfg.ldap.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "table `{source_name}.{table_name}` attribute `{col}` requires non-empty `ldap`"
+                )));
+            }
+        }
+        if let Some(p) = &self.pushdown {
+            for (col, ldap_attr) in &p.attributes {
+                if col.trim().is_empty() || ldap_attr.trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "table `{source_name}.{table_name}` pushdown attribute mapping has empty entry"
+                    )));
+                }
+                if !self.attributes.contains_key(col) {
+                    return Err(ConfigError::Validation(format!(
+                        "table `{source_name}.{table_name}` pushdown references unknown column `{col}`"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LdapScope {
+    /// Search the base entry only.
+    Base,
+    /// Search direct children of the base entry.
+    One,
+    /// Search the entire subtree rooted at the base entry.
+    Sub,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LdapAttributeConfig {
+    /// LDAP attribute name (`uid`, `mail`, `cn`, …) or `__dn__` for
+    /// the entry's distinguished name.
+    pub ldap: String,
+    #[serde(default = "default_ldap_attr_type")]
+    pub r#type: DataType,
+}
+
+fn default_ldap_attr_type() -> DataType {
+    DataType::String
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LdapPushdownConfig {
+    /// Map from SQL column name → LDAP attribute name. When a SQL
+    /// `WHERE col <op> literal` predicate matches a column listed
+    /// here, dbfy translates it into an LDAP filter fragment and
+    /// AND-merges it into the table's base filter.
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

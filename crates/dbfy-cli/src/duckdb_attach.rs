@@ -82,7 +82,8 @@ pub fn emit_attach_sql(config: &Config, opts: &AttachOpts) -> Result<String> {
             SourceConfig::Parquet(_)
             | SourceConfig::Excel(_)
             | SourceConfig::Graphql(_)
-            | SourceConfig::Postgres(_) => {
+            | SourceConfig::Postgres(_)
+            | SourceConfig::Ldap(_) => {
                 out.push_str(&format!(
                     "-- source `{source_name}` ({}) skipped — not yet wired into the DuckDB extension\n\n",
                     source_kind_name(source)
@@ -101,6 +102,7 @@ fn source_kind_name(source: &SourceConfig) -> &'static str {
         SourceConfig::Excel(_) => "excel",
         SourceConfig::Graphql(_) => "graphql",
         SourceConfig::Postgres(_) => "postgres",
+        SourceConfig::Ldap(_) => "ldap",
     }
 }
 

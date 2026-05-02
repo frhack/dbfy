@@ -103,6 +103,12 @@ enum DeferredSource {
         connection: String,
         relation: String,
     },
+    Ldap {
+        qualified: String,
+        url: String,
+        auth: Option<dbfy_config::LdapAuthConfig>,
+        cfg: dbfy_config::LdapTableConfig,
+    },
 }
 
 impl Engine {
@@ -163,6 +169,16 @@ impl Engine {
                             qualified: qualify_table_name(source_name, table_name),
                             connection: pg.connection.clone(),
                             relation: table_cfg.relation.clone(),
+                        });
+                    }
+                }
+                dbfy_config::SourceConfig::Ldap(ldap) => {
+                    for (table_name, table_cfg) in &ldap.tables {
+                        engine.deferred_sources.push(DeferredSource::Ldap {
+                            qualified: qualify_table_name(source_name, table_name),
+                            url: ldap.url.clone(),
+                            auth: ldap.auth.clone(),
+                            cfg: table_cfg.clone(),
                         });
                     }
                 }
@@ -260,6 +276,15 @@ impl Engine {
                     let provider =
                         PostgresTableProvider::discover(connection.clone(), relation.clone())
                             .await?;
+                    register_table(&ctx, qualified, Arc::new(provider))?;
+                }
+                DeferredSource::Ldap {
+                    qualified,
+                    url,
+                    auth,
+                    cfg,
+                } => {
+                    let provider = LdapTableProvider::new(url.clone(), auth.clone(), cfg.clone())?;
                     register_table(&ctx, qualified, Arc::new(provider))?;
                 }
             }
@@ -1257,6 +1282,344 @@ impl TableProvider for ExcelTableProvider {
             .collect();
         let batch = if projected_indices.is_empty() {
             let opts = arrow_array::RecordBatchOptions::new().with_row_count(Some(rows_emitted));
+            RecordBatch::try_new_with_options(target_schema.clone(), vec![], &opts)
+        } else {
+            RecordBatch::try_new(target_schema.clone(), arrays)
+        }
+        .map_err(|err| DataFusionError::External(Box::new(err)))?;
+
+        let exec: Arc<dyn ExecutionPlan> =
+            datafusion::catalog::memory::MemorySourceConfig::try_new_exec(
+                &[vec![batch]],
+                target_schema,
+                None,
+            )?;
+        Ok(exec)
+    }
+}
+
+// ----------------------------------------------------------------
+// LdapTableProvider — speaks the LDAP wire protocol via `ldap3`. SQL
+// `WHERE col <op> literal` is translated into native LDAP filter
+// expressions (`(attr=val)`, `(!(attr=val))`, `(|(attr=v1)(attr=v2))`,
+// …) and AND-merged into the table's base filter so the directory
+// server does the matching, not us. Multi-valued attributes are
+// joined with `, ` for string columns. The synthetic attribute name
+// `__dn__` exposes the entry's distinguished name.
+// ----------------------------------------------------------------
+
+#[derive(Debug)]
+struct LdapTableProvider {
+    url: String,
+    auth: Option<dbfy_config::LdapAuthConfig>,
+    cfg: dbfy_config::LdapTableConfig,
+    schema: SchemaRef,
+    /// Per-output-column: the LDAP attribute name (or `__dn__`).
+    column_to_ldap: Vec<String>,
+}
+
+impl LdapTableProvider {
+    fn new(
+        url: String,
+        auth: Option<dbfy_config::LdapAuthConfig>,
+        cfg: dbfy_config::LdapTableConfig,
+    ) -> Result<Self> {
+        let mut fields: Vec<arrow_schema::Field> = Vec::with_capacity(cfg.attributes.len());
+        let mut column_to_ldap: Vec<String> = Vec::with_capacity(cfg.attributes.len());
+        for (col, attr_cfg) in &cfg.attributes {
+            let dt = match attr_cfg.r#type {
+                dbfy_config::DataType::Boolean => arrow_schema::DataType::Boolean,
+                dbfy_config::DataType::Int64 => arrow_schema::DataType::Int64,
+                dbfy_config::DataType::Float64 => arrow_schema::DataType::Float64,
+                _ => arrow_schema::DataType::Utf8,
+            };
+            fields.push(arrow_schema::Field::new(col.as_str(), dt, true));
+            column_to_ldap.push(attr_cfg.ldap.clone());
+        }
+        Ok(Self {
+            url,
+            auth,
+            cfg,
+            schema: Arc::new(arrow_schema::Schema::new(fields)),
+            column_to_ldap,
+        })
+    }
+
+    /// Resolve a SQL column name to its underlying LDAP attribute when
+    /// `pushdown.attributes` declares a mapping.
+    fn pushdown_ldap_attr(&self, sql_column: &str) -> Option<&str> {
+        self.cfg
+            .pushdown
+            .as_ref()?
+            .attributes
+            .get(sql_column)
+            .map(String::as_str)
+    }
+
+    /// Translate a single SQL filter into an LDAP filter fragment
+    /// (`(attribute=value)` etc.). Used by both the pushdown probe and
+    /// the actual scan.
+    fn translate_filter(&self, filter: &Expr) -> Option<String> {
+        let p = try_extract_pushed_filter(filter)?;
+        let attr = self.pushdown_ldap_attr(&p.column)?;
+        let attr_esc = ldap_attr_desc_escape(attr);
+        match p.op {
+            PushedOp::IsNull => Some(format!("(!({attr_esc}=*))")),
+            PushedOp::IsNotNull => Some(format!("({attr_esc}=*)")),
+            PushedOp::In => {
+                let parts: Vec<String> = p
+                    .in_values
+                    .iter()
+                    .filter_map(|v| {
+                        scalar_to_plain_string(v)
+                            .map(|s| format!("({attr_esc}={})", ldap_value_escape(&s)))
+                    })
+                    .collect();
+                if parts.len() != p.in_values.len() {
+                    return None;
+                }
+                if parts.is_empty() {
+                    return None;
+                }
+                Some(format!("(|{})", parts.concat()))
+            }
+            op => {
+                let lit = scalar_to_plain_string(p.literal.as_ref()?)?;
+                let v = ldap_value_escape(&lit);
+                let frag = match op {
+                    PushedOp::Eq => format!("({attr_esc}={v})"),
+                    PushedOp::NotEq => format!("(!({attr_esc}={v}))"),
+                    // LDAP only has `>=` and `<=`; emulate `<` and `>`
+                    // with `(&(>=)(!(=)))` / `(&(<=)(!(=)))`.
+                    PushedOp::LtEq => format!("({attr_esc}<={v})"),
+                    PushedOp::GtEq => format!("({attr_esc}>={v})"),
+                    PushedOp::Lt => format!("(&({attr_esc}<={v})(!({attr_esc}={v})))"),
+                    PushedOp::Gt => format!("(&({attr_esc}>={v})(!({attr_esc}={v})))"),
+                    _ => unreachable!(),
+                };
+                Some(frag)
+            }
+        }
+    }
+
+    /// Compose the final LDAP filter for a scan: `(&<base>(<f1>)(<f2>)…)`.
+    /// `base` defaults to `(objectClass=*)` when the YAML omits it.
+    fn build_filter(&self, filters: &[Expr]) -> String {
+        let base = self
+            .cfg
+            .filter
+            .as_deref()
+            .unwrap_or("(objectClass=*)")
+            .trim()
+            .to_string();
+        let pushed: Vec<String> = filters
+            .iter()
+            .filter_map(|f| self.translate_filter(f))
+            .collect();
+        if pushed.is_empty() {
+            base
+        } else {
+            format!("(&{}{})", base, pushed.concat())
+        }
+    }
+}
+
+/// Escape the *value* portion of an LDAP filter assertion (RFC 4515
+/// section 3): the four special bytes `*`, `(`, `)`, `\` and NUL must
+/// be encoded as `\` + two hex digits.
+fn ldap_value_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'*' => out.push_str("\\2a"),
+            b'(' => out.push_str("\\28"),
+            b')' => out.push_str("\\29"),
+            b'\\' => out.push_str("\\5c"),
+            0 => out.push_str("\\00"),
+            _ => out.push(b as char),
+        }
+    }
+    out
+}
+
+/// LDAP attribute descriptors are restricted to the
+/// `keystring = leadkeychar *keychar` grammar (RFC 4512 section 1.4):
+/// ASCII letters, digits and hyphens, plus the OID dotted form. We
+/// reject anything outside that set defensively to avoid filter
+/// injection if a config ever carries hostile attribute names.
+fn ldap_attr_desc_escape(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.' || *c == ';')
+        .collect()
+}
+
+#[async_trait]
+impl TableProvider for LdapTableProvider {
+    fn as_any(&self) -> &(dyn std::any::Any + 'static) {
+        self
+    }
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> std::result::Result<Vec<TableProviderFilterPushDown>, DataFusionError> {
+        Ok(filters
+            .iter()
+            .map(|f| {
+                if self.translate_filter(f).is_some() {
+                    TableProviderFilterPushDown::Exact
+                } else {
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect())
+    }
+    async fn scan(
+        &self,
+        _state: &dyn datafusion::catalog::Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
+        use ldap3::{LdapConnAsync, Scope, SearchEntry};
+
+        let target_schema = projected_schema(self.schema.clone(), projection)?;
+        let composed_filter = self.build_filter(filters);
+        let scope = match self.cfg.scope.unwrap_or(dbfy_config::LdapScope::Sub) {
+            dbfy_config::LdapScope::Base => Scope::Base,
+            dbfy_config::LdapScope::One => Scope::OneLevel,
+            dbfy_config::LdapScope::Sub => Scope::Subtree,
+        };
+
+        // Always request every declared LDAP attribute (excluding the
+        // synthetic `__dn__` which we read from the entry directly);
+        // `_state.config().options().execution.batch_size` would let us
+        // get fancy here, but the wire savings come from the *filter*
+        // pushdown — projection mostly affects parsing cost, not bytes.
+        let mut attrs_to_request: Vec<String> = self
+            .column_to_ldap
+            .iter()
+            .filter(|a| *a != "__dn__")
+            .cloned()
+            .collect();
+        attrs_to_request.sort();
+        attrs_to_request.dedup();
+
+        let (conn, mut ldap) = LdapConnAsync::new(&self.url)
+            .await
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        ldap3::drive!(conn);
+
+        match &self.auth {
+            Some(dbfy_config::LdapAuthConfig::Simple {
+                bind_dn,
+                password_env,
+            }) => {
+                let pw = std::env::var(password_env).map_err(|_| {
+                    DataFusionError::External(Box::<dyn std::error::Error + Send + Sync>::from(
+                        format!("ldap: env var `{password_env}` not set"),
+                    ))
+                })?;
+                ldap.simple_bind(bind_dn, &pw)
+                    .await
+                    .and_then(|r| r.success())
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+            }
+            _ => {}
+        }
+
+        let (raw_entries, _res) = ldap
+            .search(
+                &self.cfg.base_dn,
+                scope,
+                &composed_filter,
+                attrs_to_request
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .and_then(|r| r.success())
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        let _ = ldap.unbind().await;
+
+        // Apply LIMIT in-memory: LDAP has paged results but per-table
+        // YAML doesn't expose a "size limit" knob yet — the directory's
+        // own size limit still caps things server-side.
+        let entries: Vec<SearchEntry> = raw_entries
+            .into_iter()
+            .map(SearchEntry::construct)
+            .take(limit.unwrap_or(usize::MAX))
+            .collect();
+
+        // Decode entries column-by-column according to the projected
+        // target schema (or the full schema when projection is None).
+        let projected_indices: Vec<usize> = match projection {
+            None => (0..self.column_to_ldap.len()).collect(),
+            Some(p) => p.clone(),
+        };
+        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(projected_indices.len());
+        for out_idx in &projected_indices {
+            let ldap_attr = &self.column_to_ldap[*out_idx];
+            let dt = self.schema.field(*out_idx).data_type().clone();
+            let cells: Vec<Option<String>> = entries
+                .iter()
+                .map(|e| {
+                    if ldap_attr == "__dn__" {
+                        Some(e.dn.clone())
+                    } else {
+                        e.attrs.get(ldap_attr).map(|vs| vs.join(", "))
+                    }
+                })
+                .collect();
+            let arr: ArrayRef = match dt {
+                arrow_schema::DataType::Boolean => {
+                    let v: Vec<Option<bool>> = cells
+                        .iter()
+                        .map(|c| {
+                            c.as_deref().and_then(|s| {
+                                let s = s.trim().to_ascii_lowercase();
+                                match s.as_str() {
+                                    "true" | "1" | "yes" | "y" => Some(true),
+                                    "false" | "0" | "no" | "n" => Some(false),
+                                    _ => None,
+                                }
+                            })
+                        })
+                        .collect();
+                    Arc::new(BooleanArray::from(v))
+                }
+                arrow_schema::DataType::Int64 => {
+                    let v: Vec<Option<i64>> = cells
+                        .iter()
+                        .map(|c| c.as_deref().and_then(|s| s.parse::<i64>().ok()))
+                        .collect();
+                    Arc::new(Int64Array::from(v))
+                }
+                arrow_schema::DataType::Float64 => {
+                    let v: Vec<Option<f64>> = cells
+                        .iter()
+                        .map(|c| c.as_deref().and_then(|s| s.parse::<f64>().ok()))
+                        .collect();
+                    Arc::new(Float64Array::from(v))
+                }
+                _ => {
+                    let strs: Vec<Option<&str>> = cells.iter().map(|c| c.as_deref()).collect();
+                    Arc::new(StringArray::from(strs))
+                }
+            };
+            arrays.push(arr);
+        }
+
+        let row_count = entries.len();
+        let batch = if projected_indices.is_empty() {
+            let opts = arrow_array::RecordBatchOptions::new().with_row_count(Some(row_count));
             RecordBatch::try_new_with_options(target_schema.clone(), vec![], &opts)
         } else {
             RecordBatch::try_new(target_schema.clone(), arrays)
@@ -3605,6 +3968,159 @@ sources:
                 assert_eq!(pg.tables["users"].relation, "public.users");
             }
             _ => panic!("expected postgres source"),
+        }
+    }
+
+    fn build_ldap_provider() -> super::LdapTableProvider {
+        use dbfy_config::{
+            DataType as ConfigDataType, LdapAttributeConfig, LdapPushdownConfig, LdapTableConfig,
+        };
+        let mut attributes = std::collections::BTreeMap::new();
+        attributes.insert(
+            "uid".to_string(),
+            LdapAttributeConfig {
+                ldap: "uid".to_string(),
+                r#type: ConfigDataType::String,
+            },
+        );
+        attributes.insert(
+            "mail".to_string(),
+            LdapAttributeConfig {
+                ldap: "mail".to_string(),
+                r#type: ConfigDataType::String,
+            },
+        );
+        attributes.insert(
+            "dn".to_string(),
+            LdapAttributeConfig {
+                ldap: "__dn__".to_string(),
+                r#type: ConfigDataType::String,
+            },
+        );
+        let mut variables = std::collections::BTreeMap::new();
+        variables.insert("uid".to_string(), "uid".to_string());
+        variables.insert("mail".to_string(), "mail".to_string());
+        let cfg = LdapTableConfig {
+            base_dn: "ou=people,dc=example,dc=com".to_string(),
+            scope: None,
+            filter: Some("(objectClass=inetOrgPerson)".to_string()),
+            attributes,
+            pushdown: Some(LdapPushdownConfig {
+                attributes: variables,
+            }),
+        };
+        super::LdapTableProvider::new("ldap://localhost:389".to_string(), None, cfg)
+            .expect("provider")
+    }
+
+    #[test]
+    fn ldap_filter_translation_eq_emits_attribute_equals() {
+        // Sanity check on the LDAP filter builder: the SQL `WHERE uid =
+        // 'mario'` predicate should be AND-merged into the base filter
+        // as `(uid=mario)`. This is the most load-bearing case — every
+        // directory query the user writes will hit it.
+        use datafusion::logical_expr::{col, lit};
+        let provider = build_ldap_provider();
+        let f = col("uid").eq(lit("mario"));
+        let composed = provider.build_filter(&[f]);
+        assert_eq!(
+            composed, "(&(objectClass=inetOrgPerson)(uid=mario))",
+            "{composed}"
+        );
+    }
+
+    #[test]
+    fn ldap_filter_translation_in_list_emits_or_chain() {
+        // `WHERE mail IN ('a@x', 'b@x')` becomes `(|(mail=a@x)(mail=b@x))`.
+        use datafusion::logical_expr::{col, lit};
+        let provider = build_ldap_provider();
+        let f = col("mail").in_list(vec![lit("a@x.com"), lit("b@x.com")], false);
+        let composed = provider.build_filter(&[f]);
+        assert_eq!(
+            composed, "(&(objectClass=inetOrgPerson)(|(mail=a@x.com)(mail=b@x.com)))",
+            "{composed}"
+        );
+    }
+
+    #[test]
+    fn ldap_filter_translation_escapes_special_chars() {
+        // Attacker-controlled literal must not break out of the LDAP
+        // filter syntax. RFC 4515 mandates the four bytes `*`, `(`, `)`,
+        // `\` are encoded as `\xx`.
+        use datafusion::logical_expr::{col, lit};
+        let provider = build_ldap_provider();
+        let f = col("uid").eq(lit("evil*)(cn=*"));
+        let composed = provider.build_filter(&[f]);
+        assert!(
+            composed.contains("(uid=evil\\2a\\29\\28cn=\\2a)"),
+            "{composed}"
+        );
+        // Sanity: original metacharacters absent in the value portion.
+        let v_start = composed.find("(uid=").unwrap() + 5;
+        let v_end = composed.rfind(')').unwrap();
+        let value_part = &composed[v_start..v_end];
+        // After the assertion-value portion shouldn't contain raw ( ) *.
+        // (Some `)` will appear from the closing of the assertion itself
+        // — we already stripped that with rfind.)
+        assert!(
+            !value_part.contains('(') && !value_part.ends_with('*'),
+            "{value_part}"
+        );
+    }
+
+    #[test]
+    fn ldap_filter_translation_unmapped_column_falls_back_to_post_filter() {
+        // A column that is NOT listed in `pushdown.attributes` must
+        // report `Unsupported` so DataFusion keeps a Filter operator
+        // above the scan instead of silently dropping the predicate.
+        use datafusion::logical_expr::{col, lit};
+        let provider = build_ldap_provider();
+        let f = col("dn").eq(lit("uid=mario,ou=people,dc=example,dc=com"));
+        // `dn` is in the schema but NOT in pushdown.attributes.
+        assert!(provider.translate_filter(&f).is_none());
+        // ...so build_filter omits it and keeps just the base filter.
+        let composed = provider.build_filter(&[f]);
+        assert_eq!(composed, "(objectClass=inetOrgPerson)");
+    }
+
+    #[test]
+    fn ldap_config_round_trips_through_yaml() {
+        let yaml = r#"
+version: 1
+sources:
+  directory:
+    type: ldap
+    url: "ldap://ldap.example.com:389"
+    auth:
+      type: simple
+      bind_dn: "cn=reader,dc=example,dc=com"
+      password_env: LDAP_PASSWORD
+    tables:
+      users:
+        base_dn: "ou=people,dc=example,dc=com"
+        scope: sub
+        filter: "(objectClass=inetOrgPerson)"
+        attributes:
+          uid:        { ldap: uid,        type: string }
+          mail:       { ldap: mail,       type: string }
+          dn:         { ldap: __dn__,     type: string }
+        pushdown:
+          attributes:
+            uid: uid
+            mail: mail
+"#;
+        let config = Config::from_yaml_str(yaml).expect("parses");
+        match config.sources.get("directory").unwrap() {
+            dbfy_config::SourceConfig::Ldap(ldap) => {
+                assert_eq!(ldap.url, "ldap://ldap.example.com:389");
+                assert_eq!(ldap.tables.len(), 1);
+                let users = ldap.tables.get("users").unwrap();
+                assert_eq!(users.base_dn, "ou=people,dc=example,dc=com");
+                assert_eq!(users.attributes.len(), 3);
+                let pushdown = users.pushdown.as_ref().unwrap();
+                assert_eq!(pushdown.attributes.get("uid").unwrap(), "uid");
+            }
+            _ => panic!("expected ldap source"),
         }
     }
 }
