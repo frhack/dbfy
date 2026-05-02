@@ -1,0 +1,133 @@
+# Open Source Health showcase — combined config.
+#
+# Three sources, one engine:
+#
+#   gh.issues / gh.pulls   live GitHub REST API (link-header pagination,
+#                          bearer auth, filter pushdown into ?state=)
+#   files.ci_runs          50k-row JSONL with zone maps + bloom
+#   logs.system            5-file glob of RFC 5424 syslog (zone map on ts)
+#
+# The same YAML drives both the standalone `dbfy query` CLI and the
+# DuckDB extension via `dbfy duckdb-attach`. Identical SQL works on
+# both — the showcase verifies this by running the same query through
+# both frontends and diffing the result sets.
+
+version: 1
+
+sources:
+
+  # ------------------------------------------------------------------
+  # GitHub REST API. Auth is read from $GITHUB_TOKEN; without it the
+  # rate limit is 60 req/h (anonymous) which the showcase will burn
+  # through fast. Pagination uses the standard GitHub Link header.
+  # ------------------------------------------------------------------
+  gh:
+    type: rest
+    base_url: "https://api.github.com"
+    auth:
+      type: bearer
+      token_env: GITHUB_TOKEN
+    runtime:
+      max_pages: 5
+      cache:
+        ttl_seconds: 300
+      retry:
+        max_attempts: 3
+        backoff_ms: 500
+    tables:
+      issues:
+        endpoint: { method: GET, path: /repos/duckdb/duckdb/issues }
+        root: "$[*]"
+        columns:
+          number:    { path: "$.number",    type: int64 }
+          title:     { path: "$.title",     type: string }
+          state:     { path: "$.state",     type: string }
+          author:    { path: "$.user.login", type: string }
+          comments:  { path: "$.comments",  type: int64 }
+          created_at: { path: "$.created_at", type: timestamp }
+          updated_at: { path: "$.updated_at", type: timestamp }
+          body:      { path: "$.body",      type: string }
+        pagination:
+          type: link_header
+          rel: next
+        pushdown:
+          filters:
+            state:    { param: state,    operators: ["="] }
+            author:   { param: creator,  operators: ["="] }
+          limit:
+            param: per_page
+            max: 100
+
+      pulls:
+        endpoint: { method: GET, path: /repos/duckdb/duckdb/pulls }
+        root: "$[*]"
+        columns:
+          number:    { path: "$.number",    type: int64 }
+          title:     { path: "$.title",     type: string }
+          state:     { path: "$.state",     type: string }
+          author:    { path: "$.user.login", type: string }
+          merged_at: { path: "$.merged_at", type: timestamp }
+          merge_sha: { path: "$.merge_commit_sha", type: string }
+          created_at: { path: "$.created_at", type: timestamp }
+        pagination:
+          type: link_header
+          rel: next
+        pushdown:
+          filters:
+            state:    { param: state,    operators: ["="] }
+          limit:
+            param: per_page
+            max: 100
+
+  # ------------------------------------------------------------------
+  # Synthetic CI run history. 50k rows, zone-map on `id` and `ts`,
+  # bloom on `sha` (high cardinality) and `status` (low cardinality
+  # but useful for `WHERE status = 'failure'`).
+  # ------------------------------------------------------------------
+  files:
+    type: rows_file
+    tables:
+      ci_runs:
+        path: "examples/showcase/data/ci-runs.jsonl"
+        chunk_rows: 1000
+        parser:
+          format: jsonl
+          columns:
+            - { name: id,          path: "$.id",          type: int64 }
+            - { name: ts,          path: "$.ts",          type: timestamp }
+            - { name: sha,         path: "$.sha",         type: string }
+            - { name: workflow,    path: "$.workflow",    type: string }
+            - { name: status,      path: "$.status",      type: string }
+            - { name: duration_ms, path: "$.duration_ms", type: int64 }
+            - { name: runner,      path: "$.runner",      type: string }
+            - { name: attempt,     path: "$.attempt",     type: int64 }
+        indexed_columns:
+          - { name: id,       kind: zone_map }
+          - { name: ts,       kind: zone_map }
+          - { name: sha,      kind: bloom    }
+          - { name: status,   kind: bloom    }
+          - { name: workflow, kind: bloom    }
+
+  # ------------------------------------------------------------------
+  # Syslog rotated dir. Glob expands to system-*.log; each file gets
+  # its own .dbfy_idx sidecar.
+  # ------------------------------------------------------------------
+  logs:
+    type: rows_file
+    tables:
+      system:
+        glob: "examples/showcase/data/system-*.log"
+        chunk_rows: 500
+        parser:
+          format: syslog
+          columns:
+            - { name: priority, field: priority, type: int64 }
+            - { name: severity, field: severity, type: int64 }
+            - { name: ts,       field: timestamp, type: timestamp }
+            - { name: host,     field: hostname, type: string }
+            - { name: app,      field: app_name, type: string }
+            - { name: msg,      field: message,  type: string }
+        indexed_columns:
+          - { name: ts,       kind: zone_map }
+          - { name: severity, kind: zone_map }
+          - { name: app,      kind: bloom    }

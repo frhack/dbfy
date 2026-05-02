@@ -576,7 +576,17 @@ impl RestTable {
     }
 
     fn build_client(&self) -> Result<Client> {
-        let mut builder = Client::builder();
+        // Default User-Agent. Some upstream APIs (notably GitHub:
+        // <https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required>)
+        // refuse 403 if the request omits a UA. reqwest's own
+        // hyper-based default doesn't reliably set one in all builds,
+        // so we set it explicitly. Users who need a different UA can
+        // wrap this — for now there's no `runtime.user_agent` field.
+        let mut builder = Client::builder().user_agent(concat!(
+            "dbfy/",
+            env!("CARGO_PKG_VERSION"),
+            " (+https://github.com/frhack/dbfy)"
+        ));
 
         if let Some(runtime) = &self.runtime {
             if let Some(timeout_ms) = runtime.timeout_ms {
