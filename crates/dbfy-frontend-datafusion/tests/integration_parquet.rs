@@ -50,7 +50,11 @@ fn write_orders_parquet(path: &std::path::Path) {
     .unwrap();
 
     let props = WriterProperties::builder()
-        .set_max_row_group_size(2_500) // forces ≥2 row groups
+        // `set_max_row_group_size` was renamed to
+        // `set_max_row_group_row_count` in parquet 58. We want at
+        // least two row groups so the predicate-pushdown test has
+        // something to prune on.
+        .set_max_row_group_row_count(Some(2_500))
         .build();
     let file = std::fs::File::create(path).unwrap();
     let mut writer = ArrowWriter::try_new(file, schema, Some(props)).unwrap();
