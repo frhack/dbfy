@@ -1,8 +1,8 @@
 // Run with:
 //   ./gradlew :examples:run-java   (when wired into the gradle multi-project)
 // or standalone:
-//   javac -cp dbfy-jvm-0.4.0.jar Demo.java
-//   java -cp dbfy-jvm-0.4.0.jar:. Demo
+//   javac -cp dbfy-jvm-0.4.1.jar Demo.java
+//   java -cp dbfy-jvm-0.4.1.jar:. Demo
 
 package examples.lang.java;
 

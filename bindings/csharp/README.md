@@ -46,7 +46,7 @@ dotnet add package Dbfy
 
 The NuGet package ships native binaries for `linux-x64` and
 `osx-arm64` under `runtimes/<rid>/native/`. Other platforms can build
-from source — see the workspace [README](https://github.com/frhack/dbfy).
+from source — see the workspace [README](https://github.com/typeeffect/dbfy).
 
 ## API surface
 
@@ -65,7 +65,7 @@ from source — see the workspace [README](https://github.com/frhack/dbfy).
 ## Architecture
 
 The .NET binding is a thin P/Invoke layer over the existing C library
-(`dbfy-c`, [include/dbfy.h](https://github.com/frhack/dbfy/blob/main/crates/dbfy-c/include/dbfy.h)).
+(`dbfy-c`, [include/dbfy.h](https://github.com/typeeffect/dbfy/blob/main/crates/dbfy-c/include/dbfy.h)).
 The dbfy engine emits Arrow record batches via the [Arrow C Data
 Interface](https://arrow.apache.org/docs/format/CDataInterface.html);
 the .NET side imports them zero-copy through

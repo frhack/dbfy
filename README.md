@@ -1,7 +1,7 @@
 # dbfy
 
-[![tests](https://github.com/frhack/dbfy/actions/workflows/test.yml/badge.svg)](https://github.com/frhack/dbfy/actions/workflows/test.yml)
-[![release](https://img.shields.io/github/v/release/frhack/dbfy?include_prereleases)](https://github.com/frhack/dbfy/releases)
+[![tests](https://github.com/typeeffect/dbfy/actions/workflows/test.yml/badge.svg)](https://github.com/typeeffect/dbfy/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/typeeffect/dbfy?include_prereleases)](https://github.com/typeeffect/dbfy/releases)
 [![pypi](https://img.shields.io/pypi/v/dbfy.svg)](https://pypi.org/project/dbfy/)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
@@ -35,7 +35,7 @@ Pick your language:
 pip install dbfy
 
 # Node.js / TypeScript
-npm install @frhack/dbfy
+npm install @typeeffect/dbfy
 
 # .NET
 dotnet add package Dbfy
@@ -44,21 +44,21 @@ dotnet add package Dbfy
 ```kotlin
 // Maven / Gradle (Kotlin DSL)
 dependencies {
-    implementation("com.dbfy:dbfy-kotlin:0.4.1")        // Kotlin coroutine API
+    implementation("io.github.typeeffect:dbfy-kotlin:0.4.1")        // Kotlin coroutine API
     // -- or, for Java consumers --
-    implementation("com.dbfy:dbfy-jvm:0.4.1")
-    runtimeOnly    ("com.dbfy:dbfy-jvm:0.4.1:natives-linux-x86_64")
+    implementation("io.github.typeeffect:dbfy-jvm:0.4.1")
+    runtimeOnly    ("io.github.typeeffect:dbfy-jvm:0.4.1:natives-linux-x86_64")
 }
 ```
 
 ```swift
 // Swift Package Manager
 dependencies: [
-    .package(url: "https://github.com/frhack/dbfy", from: "0.4.1"),
+    .package(url: "https://github.com/typeeffect/dbfy", from: "0.4.1"),
 ],
 ```
 
-**CLI binary** (Linux x86_64, macOS arm64) — download from [Releases](https://github.com/frhack/dbfy/releases) and add to `PATH`.
+**CLI binary** (Linux x86_64, macOS arm64) — download from [Releases](https://github.com/typeeffect/dbfy/releases) and add to `PATH`.
 
 **DuckDB extension** — same Releases page (`dbfy-<target>.duckdb_extension`):
 ```sql
@@ -67,7 +67,7 @@ LOAD 'path/to/dbfy.duckdb_extension';
 
 **From source** (Rust 1.85+):
 ```bash
-git clone https://github.com/frhack/dbfy && cd dbfy
+git clone https://github.com/typeeffect/dbfy && cd dbfy
 cargo build --release -p dbfy-cli
 ```
 
@@ -77,16 +77,16 @@ cargo build --release -p dbfy-cli
 
 | Mode | Install | Use |
 |---|---|---|
-| **CLI binary** | [Releases](https://github.com/frhack/dbfy/releases) (Linux x86_64, macOS arm64) | `dbfy query --config x.yaml "SELECT …"` |
-| **DuckDB extension** | [Releases](https://github.com/frhack/dbfy/releases) → `LOAD 'dbfy.duckdb_extension'` | `SELECT * FROM dbfy_rest('…')` / `dbfy_rows_file('…')` |
+| **CLI binary** | [Releases](https://github.com/typeeffect/dbfy/releases) (Linux x86_64, macOS arm64) | `dbfy query --config x.yaml "SELECT …"` |
+| **DuckDB extension** | [Releases](https://github.com/typeeffect/dbfy/releases) → `LOAD 'dbfy.duckdb_extension'` | `SELECT * FROM dbfy_rest('…')` / `dbfy_rows_file('…')` |
 | **Python** | `pip install dbfy` | `import dbfy; engine = dbfy.Engine.from_yaml(…)` (sync + `asyncio`, PyArrow zero-copy) |
 | **Rust library** | path / git dep on `dbfy-frontend-datafusion` | `use dbfy_frontend_datafusion::Engine;` |
 | **C** | `libdbfy.{a,so}` + `dbfy.h` (cbindgen-generated) | engine lifecycle + Arrow C Data Interface |
-| **Java** | Maven `com.dbfy:dbfy-jvm:0.4.1` + classifier `natives-<rid>` | sync `byte[] queryArrowIpc(sql)` + async `CompletableFuture<byte[]> queryAsyncArrowIpc(sql)` (FFI callback → `complete`/`completeExceptionally`, JNI `AttachCurrentThread` from tokio worker); Arrow IPC bytes → `ArrowStreamReader` |
-| **Kotlin** | Maven `com.dbfy:dbfy-kotlin:0.4.1` (transitively pulls `dbfy-jvm`) | idiomatic `suspend fun query(sql)` + `Flow<ByteArray>` streaming, exceptions thrown directly (no `ExecutionException` unwrap) |
+| **Java** | Maven `io.github.typeeffect:dbfy-jvm:0.4.1` + classifier `natives-<rid>` | sync `byte[] queryArrowIpc(sql)` + async `CompletableFuture<byte[]> queryAsyncArrowIpc(sql)` (FFI callback → `complete`/`completeExceptionally`, JNI `AttachCurrentThread` from tokio worker); Arrow IPC bytes → `ArrowStreamReader` |
+| **Kotlin** | Maven `io.github.typeeffect:dbfy-kotlin:0.4.1` (transitively pulls `dbfy-jvm`) | idiomatic `suspend fun query(sql)` + `Flow<ByteArray>` streaming, exceptions thrown directly (no `ExecutionException` unwrap) |
 | **C# / .NET** | `dotnet add package Dbfy` | `using Dbfy; var engine = Engine.FromYaml(…)` — sync `Query()` + async `Task<Result> QueryAsync(sql, ct)` (FFI callback → `TaskCompletionSource`, no thread blocking, continuations off the tokio worker); Apache.Arrow `RecordBatch` zero-copy via the C Data Interface; net8.0+ |
-| **Node.js** | npm `@frhack/dbfy@0.4.1` (prebuilt binaries for linux/macOS/windows × x64/arm64) | `import { Engine } from '@frhack/dbfy';` async `Promise<Buffer>` from `engine.query(sql)` (napi-rs ThreadsafeFunction → V8 main thread) + sync `querySync()` |
-| **Swift / iOS / macOS** | SwiftPM `https://github.com/frhack/dbfy` from 0.4.1 (binaryTarget xcframework) | `import Dbfy; let engine = try Engine.fromYaml(yaml)` — async/await `try await engine.query(sql)` via `withCheckedThrowingContinuation`; macOS 12+, iOS 15+, Mac Catalyst 15+ |
+| **Node.js** | npm `@typeeffect/dbfy@0.4.1` (prebuilt binaries for linux/macOS/windows × x64/arm64) | `import { Engine } from '@typeeffect/dbfy';` async `Promise<Buffer>` from `engine.query(sql)` (napi-rs ThreadsafeFunction → V8 main thread) + sync `querySync()` |
+| **Swift / iOS / macOS** | SwiftPM `https://github.com/typeeffect/dbfy` from 0.4.1 (binaryTarget xcframework) | `import Dbfy; let engine = try Engine.fromYaml(yaml)` — async/await `try await engine.query(sql)` via `withCheckedThrowingContinuation`; macOS 12+, iOS 15+, Mac Catalyst 15+ |
 
 ### Sources
 
@@ -100,7 +100,7 @@ cargo build --release -p dbfy-cli
 | **PostgreSQL** | ✅ stable | read-only `SELECT` over the wire — **filter + projection + limit pushdown** translated into native `WHERE / SELECT / LIMIT` so the Postgres planner can use indexes |
 | **LDAP / LDAPS** | ✅ stable | anonymous + simple bind, base / one / sub scope, **filter pushdown** that AND-merges SQL `WHERE` predicates into native LDAP filter syntax (`(&(uid=mario)(objectClass=person))`) with RFC 4515 value escaping; multi-valued attributes joined; synthetic `__dn__` column exposes entry DN |
 | **In-memory programmatic** | ✅ stable | static Arrow `RecordBatch` provider · Python-defined custom providers via Arrow C Data Interface |
-| **Coming next** | 🟡 wishlist — [vote with an issue](https://github.com/frhack/dbfy/issues?q=is%3Aissue+label%3Asource-request) | MySQL · gRPC · Parquet remote (S3/GCS) · Kafka · MongoDB · Loki / Prometheus · HTML / DOM scraping |
+| **Coming next** | 🟡 wishlist — [vote with an issue](https://github.com/typeeffect/dbfy/issues?q=is%3Aissue+label%3Asource-request) | MySQL · gRPC · Parquet remote (S3/GCS) · Kafka · MongoDB · Loki / Prometheus · HTML / DOM scraping |
 
 ## Layout
 
@@ -116,9 +116,9 @@ crates/
   dbfy-cli/ dbfy-py/ dbfy-c/ dbfy-jni/ dbfy-node/   # language native crates
 bindings/
   csharp/                       # .NET (NuGet `Dbfy`)
-  jvm/dbfy-jvm/                 # Java (Maven `com.dbfy:dbfy-jvm`)
-  jvm/dbfy-kotlin/              # Kotlin (Maven `com.dbfy:dbfy-kotlin`)
-  swift/                        # SwiftPM `https://github.com/frhack/dbfy`
+  jvm/dbfy-jvm/                 # Java (Maven `io.github.typeeffect:dbfy-jvm`)
+  jvm/dbfy-kotlin/              # Kotlin (Maven `io.github.typeeffect:dbfy-kotlin`)
+  swift/                        # SwiftPM `https://github.com/typeeffect/dbfy`
 docs/
   quickstart.md
   pushdown-matrix.md            # which operator pushes down per source

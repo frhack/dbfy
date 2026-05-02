@@ -8,7 +8,7 @@ on:
 
 # Trusted Publishing via OIDC — no PyPI token needed in repo secrets.
 # Configure once on PyPI: https://pypi.org/manage/account/publishing/
-# (publisher: github.com/frhack/dbfy, workflow: pypi.yml, env: pypi).
+# (publisher: github.com/typeeffect/dbfy, workflow: pypi.yml, env: pypi).
 
 permissions:
   id-token: write  # required for trusted publishing

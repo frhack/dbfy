@@ -2,7 +2,7 @@
 // dependency declared:
 //
 //   dependencies: [
-//     .package(url: "https://github.com/frhack/dbfy", from: "0.4.0"),
+//     .package(url: "https://github.com/typeeffect/dbfy", from: "0.4.1"),
 //   ]
 //
 // Then call `await runDemo()` from your async entry point.

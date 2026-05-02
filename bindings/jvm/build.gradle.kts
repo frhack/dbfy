@@ -1,6 +1,6 @@
 // Common configuration for both `dbfy-jvm` (Java) and `dbfy-kotlin`
 // (Kotlin extensions). Both publish to Maven Central under the
-// `com.dbfy` group; signing + publication settings live here so they
+// `io.github.typeeffect` group; signing + publication settings live here so they
 // stay in sync.
 
 // Core Gradle plugins (java-library, maven-publish, signing) live on
@@ -9,7 +9,7 @@
 // shared configuration.
 
 allprojects {
-    group = "com.dbfy"
+    group = "io.github.typeeffect"
     version = providers.gradleProperty("dbfy.version").getOrElse("0.4.1")
 
     repositories {

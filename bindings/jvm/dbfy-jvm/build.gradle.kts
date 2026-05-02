@@ -25,12 +25,12 @@ java {
 // matching their OS:
 //
 //   <dependency>
-//     <groupId>com.dbfy</groupId>
+//     <groupId>io.github.typeeffect</groupId>
 //     <artifactId>dbfy-jvm</artifactId>
 //     <version>0.3.0</version>
 //   </dependency>
 //   <dependency>
-//     <groupId>com.dbfy</groupId>
+//     <groupId>io.github.typeeffect</groupId>
 //     <artifactId>dbfy-jvm</artifactId>
 //     <version>0.3.0</version>
 //     <classifier>natives-linux-x86_64</classifier>
@@ -81,7 +81,7 @@ publishing {
                     "Postgres, LDAP, Parquet — one schema, cross-source JOINs. " +
                     "Java JNI bindings over the embedded dbfy engine."
                 )
-                url.set("https://github.com/frhack/dbfy")
+                url.set("https://github.com/typeeffect/dbfy")
                 licenses {
                     license {
                         name.set("Apache-2.0")
@@ -89,12 +89,12 @@ publishing {
                     }
                 }
                 developers {
-                    developer { id.set("frhack"); name.set("frhack") }
+                    developer { id.set("typeeffect"); name.set("typeeffect") }
                 }
                 scm {
-                    connection.set("scm:git:https://github.com/frhack/dbfy.git")
-                    developerConnection.set("scm:git:git@github.com:frhack/dbfy.git")
-                    url.set("https://github.com/frhack/dbfy")
+                    connection.set("scm:git:https://github.com/typeeffect/dbfy.git")
+                    developerConnection.set("scm:git:git@github.com:typeeffect/dbfy.git")
+                    url.set("https://github.com/typeeffect/dbfy")
                 }
             }
         }

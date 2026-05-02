@@ -58,7 +58,7 @@ canonical query, idiomatic shape per binding.
   extensions over `dbfy-jvm`: `suspend fun query(sql)` +
   `Flow<ByteArray> queryStream(sql)`. Idiomatic exceptions (no
   `ExecutionException` unwrap).
-- **`@frhack/dbfy` npm package** via napi-rs. Per-platform
+- **`@typeeffect/dbfy` npm package** via napi-rs. Per-platform
   prebuilds (linux x64/arm64, macOS x64/arm64, windows x64).
   `await engine.query(sql)` returns `Promise<Buffer>` resolved on
   the V8 main thread.

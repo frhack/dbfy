@@ -8,7 +8,7 @@ schema, so a config you generate for one frontend works in the other.
 ## 1. Build
 
 ```bash
-git clone https://github.com/frhack/dbfy && cd dbfy
+git clone https://github.com/typeeffect/dbfy && cd dbfy
 
 # Standalone CLI (under target/release/dbfy-cli):
 cargo build --release -p dbfy-cli

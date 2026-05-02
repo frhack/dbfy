@@ -1,4 +1,4 @@
-// Smoke tests for the @frhack/dbfy Node.js binding.
+// Smoke tests for the @typeeffect/dbfy Node.js binding.
 //
 // Run with `npm test`. Exercises:
 //   - Engine factory (newEmpty)

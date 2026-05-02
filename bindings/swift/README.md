@@ -9,7 +9,7 @@ as a `binaryTarget` xcframework.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/frhack/dbfy", from: "0.3.0"),
+    .package(url: "https://github.com/typeeffect/dbfy", from: "0.4.1"),
 ],
 targets: [
     .target(

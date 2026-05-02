@@ -2,12 +2,12 @@ name: npm
 
 # Cross-platform prebuild matrix for the napi-rs binding, then a
 # single publish step that uploads the platform-specific subpackages
-# (@frhack/dbfy-linux-x64-gnu, …) plus the umbrella @frhack/dbfy
+# (@typeeffect/dbfy-linux-x64-gnu, …) plus the umbrella @typeeffect/dbfy
 # package that resolves the right native at runtime.
 #
 # Required GitHub secret:
 #   NPM_TOKEN — npmjs.com automation token with publish access on
-#               the @frhack scope. Generate at
+#               the @typeeffect scope. Generate at
 #               https://www.npmjs.com/settings/<user>/tokens
 #               and grant the "Automation" type so it bypasses 2FA.
 

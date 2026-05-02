@@ -6,20 +6,24 @@ set up by hand once. This document walks through that one-time setup.
 
 ## 1. Sonatype Central namespace
 
-Maven Central is now governed by [central.sonatype.com](https://central.sonatype.com)
-(the legacy OSSRH portal is deprecated as of mid-2025).
+Maven Central is governed by [central.sonatype.com](https://central.sonatype.com)
+(the legacy OSSRH portal was deprecated mid-2025).
 
-1. Create an account at <https://central.sonatype.com>.
-2. Register the namespace `com.dbfy`. Sonatype will ask you to
-   prove ownership — for a non-domain namespace like `com.dbfy`,
-   you must instead claim a `com.github.frhack` namespace by
-   creating a public, *temporary* repo with a name they generate
-   (e.g. `OSSRH-XXXXXX`). For a real domain, add a TXT record.
-3. Wait for the namespace to be approved (usually <1h, sometimes
-   24h).
-4. Generate a **user token** under your profile → "Generate User
+We chose `io.github.typeeffect` as the groupId precisely because
+**it auto-verifies via GitHub OAuth** — Sonatype maps the namespace
+to the `typeeffect` GitHub org and checks ownership through the
+sign-in flow. No JIRA ticket, no DNS TXT record, no temporary repo
+dance. Total setup time: ~2 minutes.
+
+1. Sign in at <https://central.sonatype.com> using "Sign in with
+   GitHub" and authorise the `typeeffect` org.
+2. Click **Add Namespace** and enter `io.github.typeeffect`. The
+   portal verifies it instantly because you signed in via the same
+   GitHub identity that owns the org.
+3. Generate a **user token** under your profile → "Generate User
    Token". This produces a `username` + `password` pair —
-   these are *not* your portal login; they are token credentials.
+   these are *not* your portal login; they are credentials the CI
+   uses to upload artifacts.
 
 ## 2. GPG key for artifact signing
 
@@ -58,7 +62,7 @@ In the repo settings → Secrets and variables → Actions, add:
 ## 4. First publish
 
 ```bash
-git tag -a v0.3.0 -m "v0.3.0"
+git tag -a v0.4.1 -m "v0.4.1"
 git push --tags
 ```
 
@@ -69,21 +73,21 @@ central.sonatype.com to "promote" it to publication. Subsequent
 uploads under the same namespace publish immediately.
 
 After ~10 minutes, the artifacts appear at
-<https://repo1.maven.org/maven2/com/dbfy/dbfy-jvm/>.
+<https://repo1.maven.org/maven2/io/github/typeeffect/dbfy-jvm/>.
 
 ## 5. Consumer install snippets
 
 **Maven**:
 ```xml
 <dependency>
-  <groupId>com.dbfy</groupId>
+  <groupId>io.github.typeeffect</groupId>
   <artifactId>dbfy-jvm</artifactId>
-  <version>0.3.0</version>
+  <version>0.4.1</version>
 </dependency>
 <dependency>
-  <groupId>com.dbfy</groupId>
+  <groupId>io.github.typeeffect</groupId>
   <artifactId>dbfy-jvm</artifactId>
-  <version>0.3.0</version>
+  <version>0.4.1</version>
   <classifier>natives-linux-x86_64</classifier>
   <scope>runtime</scope>
 </dependency>
@@ -92,10 +96,10 @@ After ~10 minutes, the artifacts appear at
 **Gradle (Kotlin DSL)**:
 ```kotlin
 dependencies {
-    implementation("com.dbfy:dbfy-jvm:0.3.0")
-    runtimeOnly("com.dbfy:dbfy-jvm:0.3.0:natives-linux-x86_64")
+    implementation("io.github.typeeffect:dbfy-jvm:0.4.1")
+    runtimeOnly("io.github.typeeffect:dbfy-jvm:0.4.1:natives-linux-x86_64")
     // For Kotlin code, prefer:
-    // implementation("com.dbfy:dbfy-kotlin:0.3.0")
+    // implementation("io.github.typeeffect:dbfy-kotlin:0.4.1")
 }
 ```
 

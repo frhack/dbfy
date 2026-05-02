@@ -36,7 +36,7 @@ publishing {
                     "suspend fun query / Flow streaming, idiomatic exception model. " +
                     "Java users should prefer dbfy-jvm directly."
                 )
-                url.set("https://github.com/frhack/dbfy")
+                url.set("https://github.com/typeeffect/dbfy")
                 licenses {
                     license {
                         name.set("Apache-2.0")
@@ -44,12 +44,12 @@ publishing {
                     }
                 }
                 developers {
-                    developer { id.set("frhack"); name.set("frhack") }
+                    developer { id.set("typeeffect"); name.set("typeeffect") }
                 }
                 scm {
-                    connection.set("scm:git:https://github.com/frhack/dbfy.git")
-                    developerConnection.set("scm:git:git@github.com:frhack/dbfy.git")
-                    url.set("https://github.com/frhack/dbfy")
+                    connection.set("scm:git:https://github.com/typeeffect/dbfy.git")
+                    developerConnection.set("scm:git:git@github.com:typeeffect/dbfy.git")
+                    url.set("https://github.com/typeeffect/dbfy")
                 }
             }
         }

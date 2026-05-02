@@ -1105,7 +1105,7 @@ impl TableProvider for GraphqlTableProvider {
             .user_agent(concat!(
                 "dbfy/",
                 env!("CARGO_PKG_VERSION"),
-                " (+https://github.com/frhack/gh:dbfy)"
+                " (+https://github.com/typeeffect/dbfy)"
             ))
             .build()
             .map_err(|err| DataFusionError::External(Box::new(err)))?;

@@ -1,8 +1,8 @@
 // Run with:
-//   npm install @frhack/dbfy
+//   npm install @typeeffect/dbfy
 //   node examples/lang/node/demo.mjs
 
-import { Engine } from '@frhack/dbfy';
+import { Engine } from '@typeeffect/dbfy';
 import { tableFromIPC } from 'apache-arrow';
 
 const yaml = `

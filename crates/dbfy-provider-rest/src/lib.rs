@@ -585,7 +585,7 @@ impl RestTable {
         let mut builder = Client::builder().user_agent(concat!(
             "dbfy/",
             env!("CARGO_PKG_VERSION"),
-            " (+https://github.com/frhack/dbfy)"
+            " (+https://github.com/typeeffect/dbfy)"
         ));
 
         if let Some(runtime) = &self.runtime {

@@ -1,5 +1,5 @@
 // Build with the dbfy-kotlin Maven artifact:
-//   implementation("com.dbfy:dbfy-kotlin:0.4.0")
+//   implementation("io.github.typeeffect:dbfy-kotlin:0.4.1")
 // Then `kotlinc Demo.kt -include-runtime -d demo.jar && java -jar demo.jar`.
 
 package examples.lang.kotlin

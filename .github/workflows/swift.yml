@@ -4,7 +4,7 @@ name: swift-xcframework
 # release matching the pushed tag. Updates Package.swift in-place
 # with the checksum so consumers can pull via:
 #
-#   .package(url: "https://github.com/frhack/dbfy", from: "0.3.0")
+#   .package(url: "https://github.com/typeeffect/dbfy", from: "0.4.1")
 #
 # No external secrets needed beyond the default GITHUB_TOKEN.
 
