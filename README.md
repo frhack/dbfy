@@ -23,18 +23,44 @@ SELECT s.zone, count(*) AS hot_acked
 ```
 
 → **[Quickstart](docs/quickstart.md)** — five minutes, zero to your first SQL query.
-→ **[Showcase](examples/showcase/)** — end-to-end demo + integration test against the live GitHub API + 50k JSONL + 5×syslog.
+→ **[Showcases](examples/)** — four end-to-end demos that double as integration tests: [Service health](examples/showcase/) · [Auth audit](examples/auth-audit/) · [Finance recon](examples/finance-recon/) · [SaaS metrics](examples/saas-metrics/).
+→ **[Hello-world per language](examples/lang/)** — same canonical query in 7 idiomatic shapes (Rust · Python · C# · Java · Kotlin · Node · Swift).
 
 ## Install
 
-**Python**:
+Pick your language:
+
 ```bash
+# Python
 pip install dbfy
+
+# Node.js / TypeScript
+npm install @frhack/dbfy
+
+# .NET
+dotnet add package Dbfy
+```
+
+```kotlin
+// Maven / Gradle (Kotlin DSL)
+dependencies {
+    implementation("com.dbfy:dbfy-kotlin:0.4.1")        // Kotlin coroutine API
+    // -- or, for Java consumers --
+    implementation("com.dbfy:dbfy-jvm:0.4.1")
+    runtimeOnly    ("com.dbfy:dbfy-jvm:0.4.1:natives-linux-x86_64")
+}
+```
+
+```swift
+// Swift Package Manager
+dependencies: [
+    .package(url: "https://github.com/frhack/dbfy", from: "0.4.1"),
+],
 ```
 
 **CLI binary** (Linux x86_64, macOS arm64) — download from [Releases](https://github.com/frhack/dbfy/releases) and add to `PATH`.
 
-**DuckDB extension** — also on the Releases page (`dbfy-<target>.duckdb_extension`); load with:
+**DuckDB extension** — same Releases page (`dbfy-<target>.duckdb_extension`):
 ```sql
 LOAD 'path/to/dbfy.duckdb_extension';
 ```
@@ -56,11 +82,11 @@ cargo build --release -p dbfy-cli
 | **Python** | `pip install dbfy` | `import dbfy; engine = dbfy.Engine.from_yaml(…)` (sync + `asyncio`, PyArrow zero-copy) |
 | **Rust library** | path / git dep on `dbfy-frontend-datafusion` | `use dbfy_frontend_datafusion::Engine;` |
 | **C** | `libdbfy.{a,so}` + `dbfy.h` (cbindgen-generated) | engine lifecycle + Arrow C Data Interface |
-| **Java** | Maven `com.dbfy:dbfy-jvm:0.3.0` + classifier `natives-<rid>` | sync `byte[] queryArrowIpc(sql)` + async `CompletableFuture<byte[]> queryAsyncArrowIpc(sql)` (FFI callback → `complete`/`completeExceptionally`, JNI `AttachCurrentThread` from tokio worker); Arrow IPC bytes → `ArrowStreamReader` |
-| **Kotlin** | Maven `com.dbfy:dbfy-kotlin:0.3.0` (transitively pulls `dbfy-jvm`) | idiomatic `suspend fun query(sql)` + `Flow<ByteArray>` streaming, exceptions thrown directly (no `ExecutionException` unwrap) |
+| **Java** | Maven `com.dbfy:dbfy-jvm:0.4.1` + classifier `natives-<rid>` | sync `byte[] queryArrowIpc(sql)` + async `CompletableFuture<byte[]> queryAsyncArrowIpc(sql)` (FFI callback → `complete`/`completeExceptionally`, JNI `AttachCurrentThread` from tokio worker); Arrow IPC bytes → `ArrowStreamReader` |
+| **Kotlin** | Maven `com.dbfy:dbfy-kotlin:0.4.1` (transitively pulls `dbfy-jvm`) | idiomatic `suspend fun query(sql)` + `Flow<ByteArray>` streaming, exceptions thrown directly (no `ExecutionException` unwrap) |
 | **C# / .NET** | `dotnet add package Dbfy` | `using Dbfy; var engine = Engine.FromYaml(…)` — sync `Query()` + async `Task<Result> QueryAsync(sql, ct)` (FFI callback → `TaskCompletionSource`, no thread blocking, continuations off the tokio worker); Apache.Arrow `RecordBatch` zero-copy via the C Data Interface; net8.0+ |
-| **Node.js** | npm `@frhack/dbfy@0.3.0` (prebuilt binaries for linux/macOS/windows × x64/arm64) | `import { Engine } from '@frhack/dbfy';` async `Promise<Buffer>` from `engine.query(sql)` (napi-rs ThreadsafeFunction → V8 main thread) + sync `querySync()` |
-| **Swift / iOS / macOS** | SwiftPM `https://github.com/frhack/dbfy` from 0.3.0 (binaryTarget xcframework) | `import Dbfy; let engine = try Engine.fromYaml(yaml)` — async/await `try await engine.query(sql)` via `withCheckedThrowingContinuation`; macOS 12+, iOS 15+, Mac Catalyst 15+ |
+| **Node.js** | npm `@frhack/dbfy@0.4.1` (prebuilt binaries for linux/macOS/windows × x64/arm64) | `import { Engine } from '@frhack/dbfy';` async `Promise<Buffer>` from `engine.query(sql)` (napi-rs ThreadsafeFunction → V8 main thread) + sync `querySync()` |
+| **Swift / iOS / macOS** | SwiftPM `https://github.com/frhack/dbfy` from 0.4.1 (binaryTarget xcframework) | `import Dbfy; let engine = try Engine.fromYaml(yaml)` — async/await `try await engine.query(sql)` via `withCheckedThrowingContinuation`; macOS 12+, iOS 15+, Mac Catalyst 15+ |
 
 ### Sources
 
@@ -87,21 +113,39 @@ crates/
   dbfy-provider-static/         # in-memory RecordBatch provider
   dbfy-frontend-datafusion/     # standalone SQL engine
   dbfy-frontend-duckdb/         # `.duckdb_extension`
-  dbfy-cli/ dbfy-py/ dbfy-c/ dbfy-jni/   # language surfaces
+  dbfy-cli/ dbfy-py/ dbfy-c/ dbfy-jni/ dbfy-node/   # language native crates
+bindings/
+  csharp/                       # .NET (NuGet `Dbfy`)
+  jvm/dbfy-jvm/                 # Java (Maven `com.dbfy:dbfy-jvm`)
+  jvm/dbfy-kotlin/              # Kotlin (Maven `com.dbfy:dbfy-kotlin`)
+  swift/                        # SwiftPM `https://github.com/frhack/dbfy`
 docs/
   quickstart.md
+  pushdown-matrix.md            # which operator pushes down per source
   implementation-plan.md
 examples/
-  showcase/                     # end-to-end demo + validator
+  showcase/                     # service-health demo (REST × JSONL × syslog)
+  auth-audit/                   # LDAP × Postgres × syslog
+  finance-recon/                # Excel × Parquet × REST
+  saas-metrics/                 # GraphQL × Postgres × Excel
+  lang/                         # one canonical hello-world per binding
 ```
 
 ## Documentation
 
 - **[Quickstart](docs/quickstart.md)** — install, build, first query (CLI + DuckDB).
-- **[Showcase](examples/showcase/)** — runnable end-to-end demo: GitHub API × 50k JSONL × 5×syslog joined in one SELECT, with timing + skip-ratio numbers.
+- **[Pushdown matrix](docs/pushdown-matrix.md)** — what each source pushes down (filter / projection / limit / aggregates) and how it appears on the wire.
+- **[CHANGELOG](CHANGELOG.md)** — release notes 0.1 → today.
+- [Showcases](examples/) — four runnable demos that double as integration tests:
+  - [Service health](examples/showcase/) — GitHub API × 50k JSONL × 5×syslog
+  - [Auth audit](examples/auth-audit/) — LDAP × Postgres × syslog (login storm + orphan account detection)
+  - [Finance recon](examples/finance-recon/) — Excel × Parquet × REST (deals reconciliation)
+  - [SaaS metrics](examples/saas-metrics/) — GraphQL × Postgres × Excel (ARPU vs usage cohort)
+- [Hello-world per language](examples/lang/) — same canonical query in 7 idiomatic shapes.
 - [Implementation plan](docs/implementation-plan.md) — milestone-by-milestone history.
 - [DuckDB extension reference](crates/dbfy-frontend-duckdb/README.md) — table-function syntax, demo, capabilities matrix.
 - [Python bindings](crates/dbfy-py/README.md) — `maturin develop` wheel + API.
+- [Maven publishing setup](bindings/jvm/PUBLISHING.md) — Sonatype Central + GPG signing for the JVM artifacts.
 - [restsql_spec.md](restsql_spec.md) — original product spec.
 
 ## License
