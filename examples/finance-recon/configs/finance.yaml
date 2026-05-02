@@ -1,0 +1,32 @@
+# Finance reconciliation showcase: three sources answering "did
+# every closed deal actually get paid, and is the warehouse in sync?"
+
+version: 1
+sources:
+
+  sales:
+    type: excel
+    tables:
+      deals:
+        path: examples/finance-recon/data/deals.xlsx
+        sheet: deals
+        has_header: true
+
+  warehouse:
+    type: parquet
+    tables:
+      orders:
+        path: examples/finance-recon/data/warehouse.parquet
+
+  payments:
+    type: rest
+    base_url: "http://127.0.0.1:8765"
+    tables:
+      transactions:
+        endpoint: { method: GET, path: /payments.json }
+        root: "$.data[*]"
+        columns:
+          deal_id: { path: "$.deal_id", type: string }
+          paid_at: { path: "$.paid_at", type: string }
+          amount:  { path: "$.amount",  type: float64 }
+          status:  { path: "$.status",  type: string }

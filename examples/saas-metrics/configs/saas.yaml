@@ -1,0 +1,45 @@
+version: 1
+sources:
+
+  product:
+    type: graphql
+    endpoint: "http://127.0.0.1:8766/graphql"
+    tables:
+      usage:
+        # Single fixed query body. The `pushdown.variables` mapping
+        # below tells dbfy which SQL columns become which GraphQL
+        # variables — `WHERE month = '2026-04-01'` populates the
+        # `$month` variable on this query.
+        query: |
+          query MonthlyUsage($month: String!) {
+            usage(month: $month) {
+              customer_slug
+              events
+              mau
+            }
+          }
+        root: "$.data.usage[*]"
+        columns:
+          customer_slug: { path: "$.customer_slug", type: string }
+          events:        { path: "$.events",        type: int64 }
+          mau:           { path: "$.mau",           type: int64 }
+        pushdown:
+          variables:
+            month: month
+
+  billing:
+    type: postgres
+    connection: "postgres://postgres:postgres@127.0.0.1:5433/billing"
+    tables:
+      customers:
+        relation: customers
+      monthly_revenue:
+        relation: monthly_revenue
+
+  finance:
+    type: excel
+    tables:
+      budget:
+        path: examples/saas-metrics/data/budget.xlsx
+        sheet: fy26_budget
+        has_header: true

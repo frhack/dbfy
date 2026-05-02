@@ -1,0 +1,56 @@
+# auth-audit showcase config: three sources answering the same
+# question from three angles.
+#
+#   directory       LDAP directory — who exists in this org
+#   audit (Postgres) auth service's own event log — what we recorded
+#   syslog           OS-level sshd logs — what the OS actually saw
+#
+# The killer query joins all three to find drift: users that exist
+# but didn't log in (PTO?), audit entries with no OS evidence
+# (compromise?), syslog entries with no audit (auth service down?).
+
+version: 1
+sources:
+
+  directory:
+    type: ldap
+    url: "ldap://127.0.0.1:1389"
+    auth:
+      type: simple
+      bind_dn: "cn=admin,dc=example,dc=org"
+      password_env: LDAP_PASSWORD
+    tables:
+      users:
+        base_dn: "ou=users,dc=example,dc=org"
+        scope: sub
+        filter: "(objectClass=inetOrgPerson)"
+        attributes:
+          uid:        { ldap: uid,        type: string }
+          cn:         { ldap: cn,         type: string }
+          mail:       { ldap: mail,       type: string }
+          dn:         { ldap: __dn__,     type: string }
+        pushdown:
+          attributes:
+            uid: uid
+
+  audit:
+    type: postgres
+    connection: "postgres://postgres:postgres@127.0.0.1:5432/audit"
+    tables:
+      events:
+        relation: auth_events
+
+  syslog:
+    type: rows_file
+    tables:
+      auth:
+        path: examples/auth-audit/data/auth.log
+        parser:
+          format: syslog
+          columns:
+            - { name: ts,       field: timestamp }
+            - { name: host,     field: hostname }
+            - { name: app,      field: app_name }
+            - { name: message,  field: message }
+        indexed_columns:
+          - { name: ts, kind: zone_map }

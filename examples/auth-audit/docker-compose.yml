@@ -1,0 +1,39 @@
+# Local stack for the auth-audit showcase: an OpenLDAP directory
+# (the source of truth for users + groups) and a Postgres database
+# (the audit log written by the auth service). The third source is
+# syslog files on disk (sshd, sudo, su events) — those don't need
+# a container.
+#
+# Bring it up with:  docker compose up -d
+# Tear it down with: docker compose down -v
+
+services:
+  ldap:
+    image: bitnami/openldap:2.6
+    environment:
+      LDAP_ADMIN_USERNAME: admin
+      LDAP_ADMIN_PASSWORD: adminpass
+      LDAP_ROOT: dc=example,dc=org
+      LDAP_USERS: alice,bob,carol,dave,eve,frank,grace,heidi
+      LDAP_PASSWORDS: alicepw,bobpw,carolpw,davepw,evepw,frankpw,gracepw,heidipw
+    ports:
+      - "1389:1389"
+    healthcheck:
+      test: ["CMD", "ldapsearch", "-x", "-H", "ldap://localhost:1389", "-b", "dc=example,dc=org"]
+      interval: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: audit
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 10
+    volumes:
+      - ./data/seed.sql:/docker-entrypoint-initdb.d/00-seed.sql:ro
