@@ -302,7 +302,19 @@ impl TableProvider for RestDataFusionTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let projection_names = projection_to_names(self.schema(), projection)?.unwrap_or_default();
+        let full_schema = self.schema();
+        let projection_indices = projection.cloned();
+        let output_schema = projected_schema(full_schema.clone(), projection.as_deref())?;
+
+        // The REST provider always returns full-schema batches (it
+        // doesn't know about column-level projection in the JSON
+        // layer); the projection happens here, at the DataFusion
+        // boundary, by post-projecting each batch via
+        // `RecordBatch::project`. For `SELECT count(*)` DataFusion
+        // sends `Some(empty)`, which becomes a `Schema::empty()` +
+        // empty-column projection — Arrow handles this correctly,
+        // emitting row-only batches with `num_rows` preserved.
+        let projection_names = projection_to_names(full_schema, projection)?.unwrap_or_default();
         let rest_filters = filters
             .iter()
             .map(expr_to_rest_filter)
@@ -312,6 +324,8 @@ impl TableProvider for RestDataFusionTableProvider {
         let plan = RestStreamExecutionPlan::try_new(
             self.table.clone(),
             projection_names,
+            projection_indices,
+            output_schema,
             rest_filters,
             limit,
         )
@@ -575,6 +589,11 @@ fn rest_provider_error(error: RestProviderError) -> DataFusionError {
 struct RestStreamExecutionPlan {
     table: RestTable,
     projection_names: Vec<String>,
+    /// `Some(indices)` when DataFusion requested a column subset (could
+    /// be empty for `SELECT count(*)`); `None` when no projection was
+    /// pushed down. Drives `RecordBatch::project` at emission so the
+    /// physical batches match the logical schema DataFusion expects.
+    projection_indices: Option<Vec<usize>>,
     filters: Vec<RestSimpleFilter>,
     limit: Option<usize>,
     schema: SchemaRef,
@@ -595,10 +614,11 @@ impl RestStreamExecutionPlan {
     fn try_new(
         table: RestTable,
         projection_names: Vec<String>,
+        projection_indices: Option<Vec<usize>>,
+        schema: SchemaRef,
         filters: Vec<RestSimpleFilter>,
         limit: Option<usize>,
     ) -> Result<Self> {
-        let schema = table.schema_for_projection(&projection_names)?;
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -608,6 +628,7 @@ impl RestStreamExecutionPlan {
         Ok(Self {
             table,
             projection_names,
+            projection_indices,
             filters,
             limit,
             schema,
@@ -679,8 +700,9 @@ impl ExecutionPlan for RestStreamExecutionPlan {
 
         let schema = self.schema.clone();
         let limit = self.limit;
+        let projection_indices = self.projection_indices.clone();
 
-        let mut builder = RecordBatchReceiverStream::builder(schema, 2);
+        let mut builder = RecordBatchReceiverStream::builder(schema.clone(), 2);
         let tx = builder.tx();
         builder.spawn(async move {
             let mut stream = rest_stream.stream;
@@ -694,7 +716,16 @@ impl ExecutionPlan for RestStreamExecutionPlan {
                 let Some(batch) = apply_stream_limit(batch, &mut remaining) else {
                     break;
                 };
-                if tx.send(Ok(batch)).await.is_err() {
+                // The REST provider already returns batches matching
+                // `projection_names`, so the only case we still need
+                // to transform here is `Some(empty)` (count(*)) — the
+                // provider returns full-schema rows then; DataFusion
+                // expects an empty-schema row-only batch.
+                let emit = match projection_indices.as_deref() {
+                    Some([]) => empty_row_batch(&schema, batch.num_rows())?,
+                    _ => batch,
+                };
+                if tx.send(Ok(emit)).await.is_err() {
                     break;
                 }
             }
@@ -738,6 +769,20 @@ fn scalar_to_rest_value(value: &ScalarValue) -> Result<String> {
         ScalarValue::Utf8(value) => Ok(value.clone()),
         ScalarValue::Utf8List(values) => Ok(values.join(",")),
     }
+}
+
+/// Build a row-only `RecordBatch` (0 columns, given `num_rows`)
+/// matching an empty `target_schema`. DataFusion's `count(*)` path
+/// asks for this shape: it ignores column data and just sums row
+/// counts. `RecordBatch::try_new` rejects empty-array batches without
+/// an explicit `with_row_count`, so we use `try_new_with_options`.
+fn empty_row_batch(
+    target_schema: &SchemaRef,
+    num_rows: usize,
+) -> std::result::Result<RecordBatch, DataFusionError> {
+    let opts = arrow_array::RecordBatchOptions::new().with_row_count(Some(num_rows));
+    RecordBatch::try_new_with_options(target_schema.clone(), vec![], &opts)
+        .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))
 }
 
 fn projection_to_names(
@@ -1266,6 +1311,22 @@ fn normalize_programmatic_batch(
         return Ok(batch);
     };
 
+    // `SELECT count(*)` lands here as `Some(empty)`. Build a row-only
+    // batch (0 columns, num_rows preserved) with `try_new_with_options`;
+    // plain `try_new` would also accept it but `RecordBatch::try_new`
+    // historically rejects empty-array batches without an explicit
+    // row-count hint.
+    if projection.is_empty() {
+        let opts =
+            arrow_array::RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+        let schema = projected_schema(base_schema, Some(projection))?;
+        return RecordBatch::try_new_with_options(schema, vec![], &opts).map_err(|_| {
+            EngineError::ProviderSchemaMismatch {
+                table: table_name.to_string(),
+            }
+        });
+    }
+
     let projected_names = projection
         .iter()
         .map(|index| base_schema.field(*index).name().as_str())
@@ -1665,6 +1726,83 @@ sources:
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 1);
         assert_eq!(batches[0].num_columns(), 2);
+    }
+
+    #[tokio::test]
+    async fn select_count_star_against_rest_source() {
+        // Regression for bug #2 caught by the showcase: DataFusion
+        // sends `Some(empty)` projection for `count(*)`, which
+        // collided with our REST provider returning the full schema
+        // for empty input. The fix is in `RestStreamExecutionPlan`'s
+        // emission path (project to empty schema, preserve num_rows).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/customers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    { "id": 1, "name": "Mario",   "status": "active"   },
+                    { "id": 2, "name": "Anna",    "status": "active"   },
+                    { "id": 3, "name": "Luca",    "status": "inactive" },
+                    { "id": 4, "name": "Giulia",  "status": "active"   },
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let raw = format!(
+            r#"
+version: 1
+sources:
+  crm:
+    type: rest
+    base_url: {base_url}
+    tables:
+      customers:
+        endpoint: {{ method: GET, path: /customers }}
+        root: "$.data[*]"
+        columns:
+          id:     {{ path: "$.id",     type: int64  }}
+          name:   {{ path: "$.name",   type: string }}
+          status: {{ path: "$.status", type: string }}
+"#,
+            base_url = server.uri()
+        );
+
+        let config = Config::from_yaml_str(&raw).expect("config parses");
+        let engine = Engine::from_config(config).expect("engine builds");
+
+        // Bare `count(*)` with no WHERE — projection arrives as Some(empty).
+        let batches = engine
+            .query("SELECT count(*) FROM crm.customers")
+            .await
+            .expect("count(*) should succeed");
+        let total: i64 = batches
+            .iter()
+            .filter_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .map(|a| a.value(0))
+            })
+            .sum();
+        assert_eq!(total, 4, "count(*) should return 4 rows");
+
+        // Same path with a residual filter — exercises both
+        // empty-projection and filter-pushdown together.
+        let batches = engine
+            .query("SELECT count(*) FROM crm.customers WHERE status = 'active'")
+            .await
+            .expect("count(*) WHERE should succeed");
+        let total: i64 = batches
+            .iter()
+            .filter_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .map(|a| a.value(0))
+            })
+            .sum();
+        assert_eq!(total, 3, "WHERE status='active' matches 3 rows");
     }
 
     #[tokio::test]
