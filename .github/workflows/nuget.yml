@@ -80,7 +80,7 @@ jobs:
         run: dotnet pack Dbfy/Dbfy.csproj -c Release --no-build -o nupkgs
 
       - name: Publish to NuGet
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         working-directory: bindings/csharp
