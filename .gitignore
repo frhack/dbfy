@@ -32,3 +32,12 @@ bindings/csharp/**/native/**/*.so
 bindings/csharp/**/native/**/*.dylib
 bindings/csharp/**/native/**/*.dll
 .claude/
+node_modules/
+target/
+*.node
+bindings/jvm/.gradle/
+bindings/jvm/**/build/
+bindings/jvm/**/.gradle/
+bindings/swift/build/
+bindings/swift/dbfy.xcframework.zip
+bindings/swift/Package.resolved

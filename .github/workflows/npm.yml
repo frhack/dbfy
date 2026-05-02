@@ -1,0 +1,91 @@
+name: npm
+
+# Cross-platform prebuild matrix for the napi-rs binding, then a
+# single publish step that uploads the platform-specific subpackages
+# (@frhack/dbfy-linux-x64-gnu, …) plus the umbrella @frhack/dbfy
+# package that resolves the right native at runtime.
+#
+# Required GitHub secret:
+#   NPM_TOKEN — npmjs.com automation token with publish access on
+#               the @frhack scope. Generate at
+#               https://www.npmjs.com/settings/<user>/tokens
+#               and grant the "Automation" type so it bypasses 2FA.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu,    runner: ubuntu-latest    }
+          - { target: aarch64-unknown-linux-gnu,   runner: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin,         runner: macos-13         }
+          - { target: aarch64-apple-darwin,        runner: macos-14         }
+          - { target: x86_64-pc-windows-msvc,      runner: windows-latest   }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: crates/dbfy-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: npm install --no-audit --no-fund
+      - run: npx napi build --platform --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: crates/dbfy-node/dbfy-node.*.node
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/dbfy-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+      - uses: actions/download-artifact@v4
+        with:
+          path: crates/dbfy-node/artifacts
+      - name: Move all platform binaries next to package.json
+        run: |
+          for dir in artifacts/bindings-*; do
+            cp "$dir"/*.node ./
+          done
+          ls -la *.node
+      - run: npm install --no-audit --no-fund
+      - name: Sync version with git tag
+        run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+      - name: Prepublish (creates per-target subpackages)
+        run: npx napi prepublish --skip-gh-release
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # `napi prepublish` builds the per-platform packages under
+          # ./npm/<target>/. We publish each, then publish the
+          # umbrella package itself.
+          for pkg_dir in npm/*; do
+            (cd "$pkg_dir" && npm publish --access public)
+          done
+          npm publish --access public

@@ -1,0 +1,103 @@
+name: bindings-smoke
+
+# Smoke tests for every language binding on every PR. We don't
+# publish anywhere — these jobs prove that the bindings still
+# compile + run their unit tests against the current native build.
+#
+# Heavy build matrices (full prebuild cross-compile, xcframework
+# bundling) live in the dedicated publish workflows that run only
+# on tag push.
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  jvm:
+    name: jvm (java + kotlin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - run: cargo build -p dbfy-jni --release
+      - name: Stage native lib for classifier jar
+        run: |
+          mkdir -p bindings/jvm/dbfy-jvm/src/main/native/linux-x86_64
+          cp target/release/libdbfy_jni.so \
+             bindings/jvm/dbfy-jvm/src/main/native/linux-x86_64/
+      - name: Gradle test (dbfy-jvm + dbfy-kotlin)
+        working-directory: bindings/jvm
+        env:
+          DBFY_NATIVE_DIR: ${{ github.workspace }}/target/release
+        run: ./gradlew --no-daemon :dbfy-jvm:test :dbfy-kotlin:test
+
+  csharp:
+    name: csharp (.NET 8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: cargo build -p dbfy-c --release
+      - name: dotnet test
+        working-directory: bindings/csharp
+        env:
+          DBFY_NATIVE_DIR: ${{ github.workspace }}/target/release
+        run: dotnet test Dbfy.Tests/Dbfy.Tests.csproj --nologo
+
+  node:
+    name: node.js (napi-rs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - working-directory: crates/dbfy-node
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          npm test
+
+  swift:
+    # Swift smoke runs on macOS only — `swift build` does work on
+    # Linux but the binaryTarget download requires the GitHub release
+    # asset to be present. We exercise the manifest sanity here, and
+    # the full xcframework build runs on tag push in `swift.yml`.
+    name: swift (Package.swift sanity)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build static lib + dump Package.swift
+        run: |
+          # We can't actually fetch the published xcframework yet on
+          # PR (the release artifact only exists at tag time), so we
+          # mutate Package.swift to use a local .binaryTarget(path:)
+          # that points at a fresh build of dbfy.xcframework.
+          bash bindings/swift/build-xcframework.sh
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("bindings/swift/Package.swift")
+          src = p.read_text()
+          # Replace the url+checksum binaryTarget with a path-based one.
+          src = re.sub(
+              r'\.binaryTarget\(\s*name:\s*"DbfyNative"[^)]*\)',
+              '.binaryTarget(name: "DbfyNative", path: "build/dbfy.xcframework")',
+              src,
+              flags=re.DOTALL,
+          )
+          p.write_text(src)
+          PY
+      - name: swift test
+        working-directory: bindings/swift
+        run: swift test

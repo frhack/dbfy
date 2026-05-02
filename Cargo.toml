@@ -6,6 +6,7 @@ members = [
     "crates/dbfy-frontend-datafusion",
     "crates/dbfy-frontend-duckdb",
     "crates/dbfy-jni",
+    "crates/dbfy-node",
     "crates/dbfy-provider",
     "crates/dbfy-provider-rest",
     "crates/dbfy-provider-rows-file",

@@ -1,0 +1,89 @@
+name: maven-jvm
+
+# Build the per-platform native libs in a matrix, then aggregate them
+# on a single Linux runner that publishes the main jar + all
+# classifier jars to Sonatype Central. Triggered on tag push.
+#
+# Required GitHub secrets (set on the repo):
+#   SONATYPE_USERNAME      — Sonatype Central namespace user
+#   SONATYPE_TOKEN         — Sonatype Central user token (NOT password)
+#   MAVEN_SIGNING_KEY      — ASCII-armored GPG private key
+#   MAVEN_SIGNING_PASSWORD — passphrase for the GPG key
+#
+# The first time this runs, also do the manual steps documented in
+# bindings/jvm/PUBLISHING.md (namespace verification, etc).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-native:
+    name: native ${{ matrix.rid }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rid: linux-x86_64,   runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,    libname: libdbfy_jni.so }
+          - { rid: linux-arm64,    runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,   libname: libdbfy_jni.so }
+          - { rid: osx-x86_64,     runner: macos-13,         target: x86_64-apple-darwin,         libname: libdbfy_jni.dylib }
+          - { rid: osx-arm64,      runner: macos-14,         target: aarch64-apple-darwin,        libname: libdbfy_jni.dylib }
+          - { rid: windows-x86_64, runner: windows-latest,   target: x86_64-pc-windows-msvc,      libname: dbfy_jni.dll }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build dbfy-jni
+        run: cargo build -p dbfy-jni --release --target ${{ matrix.target }}
+        shell: bash
+      - name: Stage lib for upload
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/${{ matrix.libname }} staging/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: staging/${{ matrix.libname }}
+          retention-days: 1
+
+  publish:
+    name: publish to Sonatype Central
+    needs: build-native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: actions/download-artifact@v4
+        with:
+          path: native-artifacts
+      - name: Stage natives into src/main/native/<rid>/
+        run: |
+          for dir in native-artifacts/native-*; do
+            rid="${dir##*native-}"
+            mkdir -p "bindings/jvm/dbfy-jvm/src/main/native/$rid"
+            cp "$dir"/* "bindings/jvm/dbfy-jvm/src/main/native/$rid/"
+          done
+          # `dbfy-kotlin` reuses the same natives layout for its
+          # smoke-test classpath — no duplicate copy needed because
+          # the dependency is on `dbfy-jvm` which has them.
+          ls -R bindings/jvm/dbfy-jvm/src/main/native/
+      - name: Publish (compile + sign + upload)
+        working-directory: bindings/jvm
+        env:
+          SONATYPE_USERNAME:       ${{ secrets.SONATYPE_USERNAME }}
+          SONATYPE_TOKEN:          ${{ secrets.SONATYPE_TOKEN }}
+          SIGNING_KEY:             ${{ secrets.MAVEN_SIGNING_KEY }}
+          SIGNING_PASSWORD:        ${{ secrets.MAVEN_SIGNING_PASSWORD }}
+          ORG_GRADLE_PROJECT_dbfy_version: ${{ github.ref_name }}
+        run: |
+          # The version env var above strips the leading 'v' from the
+          # git tag (refs/tags/v0.3.0 -> 0.3.0) by Gradle convention.
+          ./gradlew --no-daemon publishAllPublicationsToSonatypeRepository

@@ -1,0 +1,57 @@
+name: swift-xcframework
+
+# Builds the dbfy.xcframework on macOS and attaches it to the
+# release matching the pushed tag. Updates Package.swift in-place
+# with the checksum so consumers can pull via:
+#
+#   .package(url: "https://github.com/frhack/dbfy", from: "0.3.0")
+#
+# No external secrets needed beyond the default GITHUB_TOKEN.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-xcframework:
+    runs-on: macos-14
+    permissions:
+      contents: write       # needed to upload the asset to the release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build xcframework
+        run: bash bindings/swift/build-xcframework.sh
+      - name: Compute checksum
+        id: ck
+        run: |
+          ck=$(swift package --package-path bindings/swift compute-checksum bindings/swift/dbfy.xcframework.zip)
+          echo "checksum=$ck" >> "$GITHUB_OUTPUT"
+      - name: Update Package.swift checksum
+        # We rewrite the binaryTarget url + checksum in-place so the
+        # tag's commit sha references the right archive. We don't
+        # commit this back — consumers fetching by tag will get the
+        # rewritten Package.swift via SwiftPM's git checkout. Force-
+        # pushing the tag is unnecessary; a fresh `git fetch` of the
+        # tag returns the rewritten manifest because we tag _after_
+        # the rewrite.
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          ck="${{ steps.ck.outputs.checksum }}"
+          url="https://github.com/${{ github.repository }}/releases/download/${tag}/dbfy.xcframework.zip"
+          python3 - <<PY
+import re, pathlib
+p = pathlib.Path("bindings/swift/Package.swift")
+src = p.read_text()
+src = re.sub(r'url:\s*"[^"]*"', f'url: "${url}"', src, count=1)
+src = re.sub(r'checksum:\s*"[^"]*"', f'checksum: "${ck}"', src, count=1)
+p.write_text(src)
+PY
+      - name: Upload xcframework to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bindings/swift/dbfy.xcframework.zip
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true

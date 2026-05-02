@@ -56,8 +56,11 @@ cargo build --release -p dbfy-cli
 | **Python** | `pip install dbfy` | `import dbfy; engine = dbfy.Engine.from_yaml(…)` (sync + `asyncio`, PyArrow zero-copy) |
 | **Rust library** | path / git dep on `dbfy-frontend-datafusion` | `use dbfy_frontend_datafusion::Engine;` |
 | **C** | `libdbfy.{a,so}` + `dbfy.h` (cbindgen-generated) | engine lifecycle + Arrow C Data Interface |
-| **Java / Kotlin** | `dbfy-jni` + `com.dbfy.Dbfy` | Arrow IPC bytes → `ArrowStreamReader` |
+| **Java** | Maven `com.dbfy:dbfy-jvm:0.3.0` + classifier `natives-<rid>` | sync `byte[] queryArrowIpc(sql)` + async `CompletableFuture<byte[]> queryAsyncArrowIpc(sql)` (FFI callback → `complete`/`completeExceptionally`, JNI `AttachCurrentThread` from tokio worker); Arrow IPC bytes → `ArrowStreamReader` |
+| **Kotlin** | Maven `com.dbfy:dbfy-kotlin:0.3.0` (transitively pulls `dbfy-jvm`) | idiomatic `suspend fun query(sql)` + `Flow<ByteArray>` streaming, exceptions thrown directly (no `ExecutionException` unwrap) |
 | **C# / .NET** | `dotnet add package Dbfy` | `using Dbfy; var engine = Engine.FromYaml(…)` — sync `Query()` + async `Task<Result> QueryAsync(sql, ct)` (FFI callback → `TaskCompletionSource`, no thread blocking, continuations off the tokio worker); Apache.Arrow `RecordBatch` zero-copy via the C Data Interface; net8.0+ |
+| **Node.js** | npm `@frhack/dbfy@0.3.0` (prebuilt binaries for linux/macOS/windows × x64/arm64) | `import { Engine } from '@frhack/dbfy';` async `Promise<Buffer>` from `engine.query(sql)` (napi-rs ThreadsafeFunction → V8 main thread) + sync `querySync()` |
+| **Swift / iOS / macOS** | SwiftPM `https://github.com/frhack/dbfy` from 0.3.0 (binaryTarget xcframework) | `import Dbfy; let engine = try Engine.fromYaml(yaml)` — async/await `try await engine.query(sql)` via `withCheckedThrowingContinuation`; macOS 12+, iOS 15+, Mac Catalyst 15+ |
 
 ### Sources
 
