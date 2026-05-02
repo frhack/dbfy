@@ -1317,8 +1317,7 @@ fn normalize_programmatic_batch(
     // historically rejects empty-array batches without an explicit
     // row-count hint.
     if projection.is_empty() {
-        let opts =
-            arrow_array::RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+        let opts = arrow_array::RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
         let schema = projected_schema(base_schema, Some(projection))?;
         return RecordBatch::try_new_with_options(schema, vec![], &opts).map_err(|_| {
             EngineError::ProviderSchemaMismatch {
