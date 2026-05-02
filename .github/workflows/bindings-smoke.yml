@@ -80,24 +80,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build static lib + dump Package.swift
         run: |
-          # We can't actually fetch the published xcframework yet on
-          # PR (the release artifact only exists at tag time), so we
-          # mutate Package.swift to use a local .binaryTarget(path:)
-          # that points at a fresh build of dbfy.xcframework.
+          # We can't fetch the published xcframework on PR (the
+          # release artifact only exists at tag time), so mutate
+          # Package.swift to use a local .binaryTarget(path:) that
+          # points at the fresh build dropped by build-xcframework.sh.
           bash bindings/swift/build-xcframework.sh
-          python3 - <<'PY'
-          import pathlib, re
-          p = pathlib.Path("bindings/swift/Package.swift")
-          src = p.read_text()
-          # Replace the url+checksum binaryTarget with a path-based one.
-          src = re.sub(
-              r'\.binaryTarget\(\s*name:\s*"DbfyNative"[^)]*\)',
-              '.binaryTarget(name: "DbfyNative", path: "build/dbfy.xcframework")',
-              src,
-              flags=re.DOTALL,
-          )
-          p.write_text(src)
-          PY
+          # Collapse the multi-line .binaryTarget(...) call into a
+          # single-line `path:` form. We do it with sed in two passes:
+          # 1) join the manifest into one line; 2) replace the whole
+          # binaryTarget(...) block; 3) reformat (just leave the line
+          # — Swift Package.swift is whitespace-tolerant).
+          sed -i.bak \
+              -e ':a;N;$!ba;s|\.binaryTarget(\s*name: "DbfyNative"[^)]*)|.binaryTarget(name: "DbfyNative", path: "build/dbfy.xcframework")|' \
+              bindings/swift/Package.swift
+          rm -f bindings/swift/Package.swift.bak
+          grep binaryTarget bindings/swift/Package.swift
       - name: swift test
         working-directory: bindings/swift
         run: swift test
