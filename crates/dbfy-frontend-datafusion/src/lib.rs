@@ -1137,40 +1137,47 @@ impl ExcelTableProvider {
         self.schema.index_of(&p.column).ok()?;
         Some(p)
     }
+}
 
-    fn row_matches(&self, row_str: &[Option<String>], predicates: &[PushedFilter]) -> bool {
-        predicates.iter().all(|p| {
-            let idx = match self.schema.index_of(&p.column) {
-                Ok(i) => i,
-                Err(_) => return false,
-            };
-            let cell = row_str.get(idx).and_then(|c| c.as_deref());
-            match &p.op {
-                PushedOp::IsNull => cell.is_none(),
-                PushedOp::IsNotNull => cell.is_some(),
-                PushedOp::In => p
-                    .in_values
-                    .iter()
-                    .filter_map(scalar_to_plain_string)
-                    .any(|v| cell == Some(v.as_str())),
-                op => {
-                    let lit = match p.literal.as_ref().and_then(scalar_to_plain_string) {
-                        Some(s) => s,
-                        None => return false,
-                    };
-                    match op {
-                        PushedOp::Eq => cell == Some(lit.as_str()),
-                        PushedOp::NotEq => cell != Some(lit.as_str()),
-                        PushedOp::Lt => cell.is_some_and(|c| c < lit.as_str()),
-                        PushedOp::LtEq => cell.is_some_and(|c| c <= lit.as_str()),
-                        PushedOp::Gt => cell.is_some_and(|c| c > lit.as_str()),
-                        PushedOp::GtEq => cell.is_some_and(|c| c >= lit.as_str()),
-                        _ => false,
-                    }
+/// Free-function counterpart of `ExcelTableProvider::row_matches` so the
+/// calamine row loop — which we run inside `tokio::task::spawn_blocking`
+/// — can stay strictly `Send`-only without holding a borrow on `&self`.
+fn excel_row_matches(
+    schema: &SchemaRef,
+    row_str: &[Option<String>],
+    predicates: &[PushedFilter],
+) -> bool {
+    predicates.iter().all(|p| {
+        let idx = match schema.index_of(&p.column) {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+        let cell = row_str.get(idx).and_then(|c| c.as_deref());
+        match &p.op {
+            PushedOp::IsNull => cell.is_none(),
+            PushedOp::IsNotNull => cell.is_some(),
+            PushedOp::In => p
+                .in_values
+                .iter()
+                .filter_map(scalar_to_plain_string)
+                .any(|v| cell == Some(v.as_str())),
+            op => {
+                let lit = match p.literal.as_ref().and_then(scalar_to_plain_string) {
+                    Some(s) => s,
+                    None => return false,
+                };
+                match op {
+                    PushedOp::Eq => cell == Some(lit.as_str()),
+                    PushedOp::NotEq => cell != Some(lit.as_str()),
+                    PushedOp::Lt => cell.is_some_and(|c| c < lit.as_str()),
+                    PushedOp::LtEq => cell.is_some_and(|c| c <= lit.as_str()),
+                    PushedOp::Gt => cell.is_some_and(|c| c > lit.as_str()),
+                    PushedOp::GtEq => cell.is_some_and(|c| c >= lit.as_str()),
+                    _ => false,
                 }
             }
-        })
-    }
+        }
+    })
 }
 
 #[async_trait]
@@ -1206,87 +1213,112 @@ impl TableProvider for ExcelTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        use arrow_array::{ArrayRef, StringArray};
-        use calamine::{Data, Reader, open_workbook_auto};
-
         let target_schema = projected_schema(self.schema.clone(), projection)?;
         let predicates: Vec<PushedFilter> = filters
             .iter()
             .filter_map(|f| self.translates_to_predicate(f))
             .collect();
 
-        let mut wb = open_workbook_auto(&self.cfg.path)
-            .map_err(|err| DataFusionError::External(Box::new(err)))?;
-        let sheet_name = match &self.cfg.sheet {
-            Some(s) => s.clone(),
-            None => wb.sheet_names().first().cloned().ok_or_else(|| {
-                DataFusionError::External(Box::<dyn std::error::Error + Send + Sync>::from(
-                    "excel: no sheets",
-                ))
-            })?,
-        };
-        let range = wb
-            .worksheet_range(&sheet_name)
-            .map_err(|err| DataFusionError::External(Box::new(err)))?;
-
+        // calamine is sync I/O backed by mmap + zip + xml parsing. Running
+        // it inline inside an async `scan` would sequester a tokio worker
+        // thread for the entire workbook read, starving every other
+        // concurrent scan in the same DataFusion session. Move the work
+        // to the blocking pool so async tasks keep flowing while the
+        // spreadsheet is decoded.
+        let path = self.cfg.path.clone();
+        let sheet_cfg = self.cfg.sheet.clone();
+        let has_header = self.cfg.has_header;
         let n_cols = self.column_indices.len();
-        let mut columns: Vec<Vec<Option<String>>> = vec![Vec::new(); n_cols];
-        let mut rows_emitted = 0usize;
-        let row_iter = range.rows();
-        let mut iter = row_iter.into_iter();
-        if self.cfg.has_header {
-            iter.next();
-        }
-        for row in iter {
-            if let Some(n) = limit {
-                if rows_emitted >= n {
-                    break;
-                }
-            }
-            let mut row_str: Vec<Option<String>> = Vec::with_capacity(n_cols);
-            for i in 0..n_cols {
-                let cell = row.get(i);
-                let s = cell.and_then(|c| match c {
-                    Data::Empty => None,
-                    Data::String(s) => Some(s.clone()),
-                    Data::Int(n) => Some(n.to_string()),
-                    Data::Float(n) => Some(n.to_string()),
-                    Data::Bool(b) => Some(b.to_string()),
-                    Data::DateTime(dt) => Some(dt.to_string()),
-                    Data::Error(e) => Some(format!("#ERROR:{e:?}")),
-                    Data::DurationIso(s) | Data::DateTimeIso(s) => Some(s.clone()),
-                });
-                row_str.push(s);
-            }
-            if !self.row_matches(&row_str, &predicates) {
-                continue;
-            }
-            for (i, val) in row_str.into_iter().enumerate() {
-                columns[i].push(val);
-            }
-            rows_emitted += 1;
-        }
-
-        // Build the projected batch directly so we don't pay column
-        // copying for unused columns.
+        let schema_for_match = self.schema.clone();
         let projected_indices: Vec<usize> = match projection {
             None => (0..n_cols).collect(),
             Some(p) => p.clone(),
         };
-        let arrays: Vec<ArrayRef> = projected_indices
-            .iter()
-            .map(|i| {
-                let strs: Vec<Option<&str>> = columns[*i].iter().map(|s| s.as_deref()).collect();
-                Arc::new(StringArray::from(strs)) as ArrayRef
-            })
-            .collect();
-        let batch = if projected_indices.is_empty() {
-            let opts = arrow_array::RecordBatchOptions::new().with_row_count(Some(rows_emitted));
-            RecordBatch::try_new_with_options(target_schema.clone(), vec![], &opts)
-        } else {
-            RecordBatch::try_new(target_schema.clone(), arrays)
-        }
-        .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        let target_schema_for_blocking = target_schema.clone();
+        let batch = tokio::task::spawn_blocking(
+            move || -> std::result::Result<RecordBatch, DataFusionError> {
+                use arrow_array::{ArrayRef, StringArray};
+                use calamine::{Data, Reader, open_workbook_auto};
+
+                let mut wb = open_workbook_auto(&path)
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                let sheet_name = match sheet_cfg {
+                    Some(s) => s,
+                    None => wb.sheet_names().first().cloned().ok_or_else(|| {
+                        DataFusionError::External(Box::<dyn std::error::Error + Send + Sync>::from(
+                            "excel: no sheets",
+                        ))
+                    })?,
+                };
+                let range = wb
+                    .worksheet_range(&sheet_name)
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+
+                let mut columns: Vec<Vec<Option<String>>> = vec![Vec::new(); n_cols];
+                let mut rows_emitted = 0usize;
+                let mut iter = range.rows();
+                if has_header {
+                    iter.next();
+                }
+                for row in iter {
+                    if let Some(n) = limit {
+                        if rows_emitted >= n {
+                            break;
+                        }
+                    }
+                    let mut row_str: Vec<Option<String>> = Vec::with_capacity(n_cols);
+                    for i in 0..n_cols {
+                        let cell = row.get(i);
+                        let s = cell.and_then(|c| match c {
+                            Data::Empty => None,
+                            Data::String(s) => Some(s.clone()),
+                            Data::Int(n) => Some(n.to_string()),
+                            Data::Float(n) => Some(n.to_string()),
+                            Data::Bool(b) => Some(b.to_string()),
+                            Data::DateTime(dt) => Some(dt.to_string()),
+                            Data::Error(e) => Some(format!("#ERROR:{e:?}")),
+                            Data::DurationIso(s) | Data::DateTimeIso(s) => Some(s.clone()),
+                        });
+                        row_str.push(s);
+                    }
+                    if !excel_row_matches(&schema_for_match, &row_str, &predicates) {
+                        continue;
+                    }
+                    for (i, val) in row_str.into_iter().enumerate() {
+                        columns[i].push(val);
+                    }
+                    rows_emitted += 1;
+                }
+
+                let arrays: Vec<ArrayRef> = projected_indices
+                    .iter()
+                    .map(|i| {
+                        let strs: Vec<Option<&str>> =
+                            columns[*i].iter().map(|s| s.as_deref()).collect();
+                        Arc::new(StringArray::from(strs)) as ArrayRef
+                    })
+                    .collect();
+                let batch = if projected_indices.is_empty() {
+                    let opts =
+                        arrow_array::RecordBatchOptions::new().with_row_count(Some(rows_emitted));
+                    RecordBatch::try_new_with_options(
+                        target_schema_for_blocking.clone(),
+                        vec![],
+                        &opts,
+                    )
+                } else {
+                    RecordBatch::try_new(target_schema_for_blocking.clone(), arrays)
+                }
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                Ok(batch)
+            },
+        )
+        .await
+        .map_err(|join_err| {
+            DataFusionError::External(Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                "excel: blocking task panicked: {join_err}"
+            )))
+        })??;
 
         let exec: Arc<dyn ExecutionPlan> =
             datafusion::catalog::memory::MemorySourceConfig::try_new_exec(
