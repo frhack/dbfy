@@ -30,25 +30,21 @@ jobs:
           ck=$(swift package --package-path bindings/swift compute-checksum bindings/swift/dbfy.xcframework.zip)
           echo "checksum=$ck" >> "$GITHUB_OUTPUT"
       - name: Update Package.swift checksum
-        # We rewrite the binaryTarget url + checksum in-place so the
-        # tag's commit sha references the right archive. We don't
-        # commit this back — consumers fetching by tag will get the
-        # rewritten Package.swift via SwiftPM's git checkout. Force-
-        # pushing the tag is unnecessary; a fresh `git fetch` of the
-        # tag returns the rewritten manifest because we tag _after_
-        # the rewrite.
+        # Rewrite the binaryTarget url + checksum in-place so consumers
+        # fetching by tag get a Package.swift that points at the right
+        # archive with the right hash. We use BSD-portable `sed -i.bak`
+        # so the same workflow runs on macos-14 (default sed) without
+        # any GNU extensions.
         run: |
           tag="${GITHUB_REF_NAME}"
           ck="${{ steps.ck.outputs.checksum }}"
           url="https://github.com/${{ github.repository }}/releases/download/${tag}/dbfy.xcframework.zip"
-          python3 - <<PY
-import re, pathlib
-p = pathlib.Path("bindings/swift/Package.swift")
-src = p.read_text()
-src = re.sub(r'url:\s*"[^"]*"', f'url: "${url}"', src, count=1)
-src = re.sub(r'checksum:\s*"[^"]*"', f'checksum: "${ck}"', src, count=1)
-p.write_text(src)
-PY
+          sed -i.bak \
+              -e "s|url: \"[^\"]*\"|url: \"$url\"|" \
+              -e "s|checksum: \"[^\"]*\"|checksum: \"$ck\"|" \
+              bindings/swift/Package.swift
+          rm -f bindings/swift/Package.swift.bak
+          grep -A1 binaryTarget bindings/swift/Package.swift | head -5
       - name: Upload xcframework to GitHub release
         uses: softprops/action-gh-release@v2
         with:
