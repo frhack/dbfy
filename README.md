@@ -102,6 +102,56 @@ cargo build --release -p dbfy-cli
 | **In-memory programmatic** | ✅ stable | static Arrow `RecordBatch` provider · Python-defined custom providers via Arrow C Data Interface |
 | **Coming next** | 🟡 wishlist — [vote with an issue](https://github.com/typeeffect/dbfy/issues?q=is%3Aissue+label%3Asource-request) | MySQL · gRPC · Parquet remote (S3/GCS) · Kafka · MongoDB · Loki / Prometheus · HTML / DOM scraping |
 
+## Architecture
+
+Three-layer stack. **Engine logic lives in Rust only** — every
+binding delegates to it; nothing is reimplemented per language.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  HOST LANGUAGE BINDINGS — glue + marshalling, no engine logic       │
+│  C# · Java · Kotlin · Swift                       ~1 100 LoC total  │
+└─────────────────────────────┬───────────────────────────────────────┘
+                              │ FFI · JNI · napi-rs · PyO3
+┌─────────────────────────────▼───────────────────────────────────────┐
+│  FFI WRAPPER CRATES — expose `Engine` to each host language         │
+│  dbfy-c · dbfy-jni · dbfy-node · dbfy-py        ~1 100 LoC total    │
+└─────────────────────────────┬───────────────────────────────────────┘
+                              │ use dbfy_frontend_datafusion::Engine
+┌─────────────────────────────▼───────────────────────────────────────┐
+│  CORE ENGINE — single source of truth                               │
+│  dbfy-frontend-datafusion + config + provider-*  ~8 700 LoC         │
+│                                                                     │
+│  Sources, pushdown, streaming, cancellation, schema discovery,      │
+│  filter translation, async — all here.                              │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Why it matters.** Every engine improvement (new source, new
+pushdown operator, optimisation, bug fix) lands once in the Rust
+core and propagates automatically to all 7 languages. The only
+per-binding cost is when a *new public API surface* is added (e.g.
+async query in v0.3 → v0.4) — one Rust-side design plus N small
+marshalling implementations.
+
+**What's intentionally repeated across bindings**:
+
+- The `Engine.fromYaml / .query / .explain` *shape* — each
+  language has different idioms (Java getters, C# properties,
+  Swift actors, Kotlin suspend functions). This is API surface,
+  not logic.
+- The async FFI-callback bridge — each runtime has its own
+  primitive for completion (`TaskCompletionSource` / `CompletableFuture`
+  / `withCheckedThrowingContinuation` / napi-rs `ThreadsafeFunction`).
+  The pattern is the same; the marshalling has to be per-language.
+- The Arrow exchange path — two lanes by intent: zero-copy via
+  Arrow C Data Interface (C, C#, Swift, Python) or IPC bytes
+  (Java, Kotlin, Node), depending on what each ecosystem speaks
+  best.
+
+[`Engine::query()`](crates/dbfy-frontend-datafusion/src/lib.rs)
+alone has more code than all the host bindings combined.
+
 ## Layout
 
 ```text
