@@ -1,0 +1,47 @@
+name: integration
+
+# Integration tests against real backends (Postgres, OpenLDAP) via
+# testcontainers. Runs on PR + push-to-main on ubuntu-latest, which
+# ships Docker pre-installed and ready. macOS / Windows runners do
+# NOT have Docker by default and are not part of this matrix.
+#
+# These tests are gated `#[ignore]` so a normal `cargo test` skips
+# them; here we explicitly pass `-- --ignored` to run them.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  postgres:
+    name: postgres ${{ matrix.test }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - integration_postgres
+          - integration_ldap
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify docker is available
+        run: docker info >/dev/null
+      - name: Pre-pull container images
+        # Pulling here lets the test runner spend zero seconds on
+        # network during the test, and surfaces auth / network
+        # failures with a clear error message instead of a flaky
+        # `testcontainers: timed out`.
+        run: |
+          if [[ "${{ matrix.test }}" == "integration_postgres" ]]; then
+            docker pull postgres:11-alpine
+          else
+            docker pull bitnami/openldap:2.6
+          fi
+      - name: cargo test ${{ matrix.test }}
+        run: |
+          cargo test --test ${{ matrix.test }} \
+            -p dbfy-frontend-datafusion \
+            -- --ignored --nocapture --test-threads=1
