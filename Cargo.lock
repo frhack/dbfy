@@ -1723,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-c"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1735,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1756,7 +1756,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-schema",
  "serde",
@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-frontend-datafusion"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-frontend-duckdb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1815,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-jni"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -1828,7 +1828,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-provider"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1839,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-provider-rest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1856,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-provider-rows-file"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1880,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-provider-static"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1891,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "dbfy-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-array",
  "arrow-pyarrow",

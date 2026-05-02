@@ -348,20 +348,40 @@ fn ensure_schema(ctx: &SessionContext, catalog_name: &str, schema_name: &str) ->
 // Helpers for the four async / batch-materialised sources.
 // ----------------------------------------------------------------
 
-/// Register a Parquet file (or directory / glob of files) into the
-/// DataFusion `SessionContext` under the qualified name. v1 uses
-/// `read_parquet` + materialise into a `MemTable`. Streaming via
-/// `ListingTable` is a follow-up once we settle on a stable
-/// schema-discovery API across DataFusion versions.
+/// Register a Parquet file (or directory / glob of files) under the
+/// qualified name. Uses DataFusion's native `register_parquet` which
+/// installs a `ListingTable` — predicate, projection and row-group
+/// pushdown into the parquet reader work natively (no
+/// materialise-then-filter). Schemas are auto-discovered.
 async fn register_parquet(ctx: &SessionContext, qualified: &str, path: &str) -> Result<()> {
     use datafusion::prelude::ParquetReadOptions;
 
-    let df = ctx
-        .read_parquet(path, ParquetReadOptions::default())
+    // `register_parquet` doesn't auto-create schemas the way our
+    // manual `register_table` does, so mirror the qualifier handling
+    // here for `source.table` / `catalog.source.table` references.
+    let table_ref = TableReference::parse_str(qualified);
+    match &table_ref {
+        TableReference::Partial { schema, .. } => {
+            let default_catalog = ctx
+                .copied_config()
+                .options()
+                .catalog
+                .default_catalog
+                .clone();
+            ensure_schema(ctx, &default_catalog, schema)?;
+        }
+        TableReference::Full {
+            catalog, schema, ..
+        } => {
+            ensure_schema(ctx, catalog, schema)?;
+        }
+        TableReference::Bare { .. } => {}
+    }
+
+    ctx.register_parquet(table_ref, path, ParquetReadOptions::default())
         .await
         .map_err(DataFusionError::from)?;
-    let batches = df.collect().await.map_err(DataFusionError::from)?;
-    register_memtable(ctx, qualified, batches)
+    Ok(())
 }
 
 /// Materialise a list of `RecordBatch`es as a `MemTable` and register
@@ -2696,6 +2716,78 @@ sources:
             .unwrap();
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 10);
+    }
+
+    #[tokio::test]
+    async fn parquet_source_keeps_pushdown() {
+        // Regression: v1's first cut went through `read_parquet().collect()`
+        // which materialised every row before applying filters. Calling
+        // DataFusion's native `register_parquet` (ListingTable) instead
+        // preserves predicate + projection + row-group pushdown.
+        // We don't directly inspect what got pruned here; we just check
+        // a `WHERE id = K` query against a 1000-row file actually finds
+        // the row, which is the correctness side. The pushdown win is
+        // visible in `EXPLAIN`.
+        use datafusion::dataframe::DataFrameWriteOptions;
+        use datafusion::execution::context::SessionContext as DfSessionContext;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let parquet_path = dir.path().join("big.parquet");
+        let writer_ctx = DfSessionContext::new();
+        let df = writer_ctx
+            .sql("SELECT t.value AS id FROM generate_series(1, 1000) AS t")
+            .await
+            .expect("writer SQL");
+        df.write_parquet(
+            parquet_path.to_str().unwrap(),
+            DataFrameWriteOptions::default(),
+            None,
+        )
+        .await
+        .expect("write parquet");
+
+        let yaml = format!(
+            r#"
+version: 1
+sources:
+  data:
+    type: parquet
+    tables:
+      items:
+        path: "{}"
+"#,
+            parquet_path.display()
+        );
+        let config = Config::from_yaml_str(&yaml).expect("config");
+        let engine = Engine::from_config(config).expect("engine");
+
+        let batches = engine
+            .query("SELECT id FROM data.items WHERE id = 777")
+            .await
+            .expect("filtered query");
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 1, "should find exactly id=777");
+
+        // Range filter — confirms predicate pushdown into the parquet
+        // reader doesn't break the result set. The actual proof that
+        // pushdown is happening (vs materialise-then-filter) is the
+        // ListingTable code path inside `register_parquet`; this test
+        // pins the correctness side.
+        let batches = engine
+            .query("SELECT count(*) FROM data.items WHERE id BETWEEN 100 AND 199")
+            .await
+            .expect("range query");
+        let total: i64 = batches
+            .iter()
+            .filter_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .map(|a| a.value(0))
+            })
+            .sum();
+        assert_eq!(total, 100, "BETWEEN 100 AND 199 should match 100 rows");
     }
 
     #[tokio::test]
