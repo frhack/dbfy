@@ -31,3 +31,4 @@ obj/
 bindings/csharp/**/native/**/*.so
 bindings/csharp/**/native/**/*.dylib
 bindings/csharp/**/native/**/*.dll
+.claude/
