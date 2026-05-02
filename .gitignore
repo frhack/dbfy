@@ -21,3 +21,13 @@ __pycache__/
 # created by `maturin develop` and should never be committed.
 crates/dbfy-py/python/dbfy/_dbfy*.so
 crates/dbfy-py/python/dbfy/_restsql*.so
+
+# .NET build outputs
+bin/
+obj/
+*.suo
+*.user
+.vs/
+bindings/csharp/**/native/**/*.so
+bindings/csharp/**/native/**/*.dylib
+bindings/csharp/**/native/**/*.dll

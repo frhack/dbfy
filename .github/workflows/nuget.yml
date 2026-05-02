@@ -1,0 +1,100 @@
+name: nuget
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# NuGet trusted publishing isn't available yet (Microsoft is rolling
+# it out). Until then we use a repository secret `NUGET_API_KEY`
+# pointing at a deploy key on https://www.nuget.org/account/apikeys
+# scoped to the `Dbfy` package.
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build-native:
+    name: native ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, rid: linux-x64,  lib: libdbfy.so }
+          - { runner: macos-14,      target: aarch64-apple-darwin,    rid: osx-arm64,  lib: libdbfy.dylib }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nuget-native-${{ matrix.target }}
+      - name: Build libdbfy
+        run: cargo build -p dbfy-c --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: target/${{ matrix.target }}/release/${{ matrix.lib }}
+
+  pack-and-publish:
+    name: NuGet publish
+    needs: build-native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Pull native libs from the matrix and arrange them in the
+      # bindings/csharp/Dbfy/native/<rid>/ tree so .csproj's
+      # conditional <None Include="..." Pack="true" /> entries
+      # pick them up.
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Stage natives under Dbfy/native
+        run: |
+          mkdir -p bindings/csharp/Dbfy/native/linux-x64
+          mkdir -p bindings/csharp/Dbfy/native/osx-arm64
+          cp artifacts/native-linux-x64/libdbfy.so bindings/csharp/Dbfy/native/linux-x64/
+          cp artifacts/native-osx-arm64/libdbfy.dylib bindings/csharp/Dbfy/native/osx-arm64/
+          ls -laR bindings/csharp/Dbfy/native
+
+      - name: Restore + build
+        working-directory: bindings/csharp
+        run: |
+          dotnet restore
+          dotnet build Dbfy/Dbfy.csproj -c Release --no-restore
+
+      - name: Pack
+        working-directory: bindings/csharp
+        run: dotnet pack Dbfy/Dbfy.csproj -c Release --no-build -o nupkgs
+
+      - name: Publish to NuGet
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        working-directory: bindings/csharp
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::warning::NUGET_API_KEY secret not set — skipping publish"
+            exit 0
+          fi
+          dotnet nuget push nupkgs/*.nupkg \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key "$NUGET_API_KEY" \
+            --skip-duplicate
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkgs
+          path: bindings/csharp/nupkgs/*.nupkg

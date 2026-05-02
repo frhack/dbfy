@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net8.0 is the current LTS; older targets would lose
+         NativeLibrary (needs .NET Core 3+) and modern Arrow.
+         net6 is EOL since Nov 2024. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Dbfy</RootNamespace>
+    <AssemblyName>Dbfy</AssemblyName>
+
+    <!-- NuGet metadata. -->
+    <PackageId>Dbfy</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>frhack</Authors>
+    <Description>Each source is a SQL table: REST APIs, log files, CSV, JSONL, syslog — one schema, cross-source JOINs. .NET wrapper over the dbfy embedded SQL federation engine.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/frhack/dbfy</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/frhack/dbfy.git</RepositoryUrl>
+    <PackageTags>sql;duckdb;datafusion;federation;rest;arrow</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <!-- Native libs are picked up at pack time via the
+         runtimes/(rid)/native layout when CI populates the `native/`
+         folder from the per-target Rust builds. Locally, the smoke
+         test discovers libdbfy.so via DBFY_NATIVE_DIR env var
+         (see Native.cs) so you can `dotnet test` after building
+         dbfy-c in release mode. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Apache.Arrow's `Apache.Arrow.C` namespace ships the
+         CArrowArray / CArrowSchema wrappers + Importer types we use to
+         convert dbfy's exported C-Data-Interface batches into typed
+         RecordBatch instances zero-copy. -->
+    <PackageReference Include="Apache.Arrow" Version="18.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="\" Condition="Exists('../README.md')" />
+  </ItemGroup>
+
+  <!-- Native lib targets used by `dotnet pack`: when CI has populated
+       native/<rid>/<libname> for each target, they're embedded into the
+       NuGet package under runtimes/. Empty during local builds, which
+       fall back to DBFY_NATIVE_DIR. -->
+  <ItemGroup>
+    <None Include="native/linux-x64/libdbfy.so"
+          Pack="true" PackagePath="runtimes/linux-x64/native/libdbfy.so"
+          Condition="Exists('native/linux-x64/libdbfy.so')" />
+    <None Include="native/osx-arm64/libdbfy.dylib"
+          Pack="true" PackagePath="runtimes/osx-arm64/native/libdbfy.dylib"
+          Condition="Exists('native/osx-arm64/libdbfy.dylib')" />
+  </ItemGroup>
+
+</Project>

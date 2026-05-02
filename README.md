@@ -57,6 +57,7 @@ cargo build --release -p dbfy-cli
 | **Rust library** | path / git dep on `dbfy-frontend-datafusion` | `use dbfy_frontend_datafusion::Engine;` |
 | **C** | `libdbfy.{a,so}` + `dbfy.h` (cbindgen-generated) | engine lifecycle + Arrow C Data Interface |
 | **Java / Kotlin** | `dbfy-jni` + `com.dbfy.Dbfy` | Arrow IPC bytes → `ArrowStreamReader` |
+| **C# / .NET** | `dotnet add package Dbfy` | `using Dbfy; var engine = Engine.FromYaml(…)` — Apache.Arrow `RecordBatch` zero-copy via the C Data Interface; net8.0+ |
 
 ### Sources
 
