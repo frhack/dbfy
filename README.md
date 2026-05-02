@@ -66,9 +66,9 @@ cargo build --release -p dbfy-cli
 | **REST / HTTP** | ✅ stable | page / offset / cursor / link-header pagination · 4 auth modes · retry + `Retry-After` · in-memory TTL + singleflight HTTP cache · filter pushdown into URL params |
 | **Line-delimited files** | ✅ stable | JSONL · CSV · logfmt · syslog (RFC 5424) · regex (CLF / ELF) — with L3 indexing (zone maps + bloom + incremental EXTEND on append) and glob multi-file expansion |
 | **Parquet** | ✅ stable | local files + glob, schema auto-discovery, **predicate + projection + row-group pushdown** native (DataFusion ListingTable) |
-| **Excel** (`.xlsx` / `.xls`) | 🟢 v1 | sheet selection, header / no-header, all values typed as string in v1 — no pushdown into the workbook ([#11](https://github.com/frhack/dbfy/issues/11)) |
-| **GraphQL** | 🟢 v1 | POST + bearer auth, JSONPath root extraction, typed columns — query is fixed, no variables pushdown yet ([#12](https://github.com/frhack/dbfy/issues/12)) |
-| **PostgreSQL** | 🟢 v1 | read-only `SELECT` against declared relations, type mapping for bool/int/float/text — filter / projection / limit pushdown into the wire query is future work ([#13](https://github.com/frhack/dbfy/issues/13)) |
+| **Excel** (`.xlsx` / `.xls`) | ✅ stable | sheet selection, **predicate + projection + limit pushdown applied at row-iteration time** (skip-on-read, no full materialisation) |
+| **GraphQL** | ✅ stable | POST + bearer auth, JSONPath root extraction, **variables pushdown** via `pushdown.variables` mapping (`WHERE col = lit` → GraphQL variable) |
+| **PostgreSQL** | ✅ stable | read-only `SELECT` over the wire — **filter + projection + limit pushdown** translated into native `WHERE / SELECT / LIMIT` so the Postgres planner can use indexes |
 | **In-memory programmatic** | ✅ stable | static Arrow `RecordBatch` provider · Python-defined custom providers via Arrow C Data Interface |
 | **Coming next** | 🟡 wishlist — [vote with an issue](https://github.com/frhack/dbfy/issues?q=is%3Aissue+label%3Asource-request) | MySQL · gRPC · Parquet remote (S3/GCS) · Kafka · MongoDB · Loki / Prometheus · LDAP · HTML / DOM scraping |
 

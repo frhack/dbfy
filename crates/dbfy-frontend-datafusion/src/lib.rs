@@ -239,8 +239,8 @@ impl Engine {
                     register_parquet(&ctx, qualified, path).await?;
                 }
                 DeferredSource::Excel { qualified, cfg } => {
-                    let batches = read_excel(cfg)?;
-                    register_memtable(&ctx, qualified, batches)?;
+                    let provider = ExcelTableProvider::new(cfg.clone())?;
+                    register_table(&ctx, qualified, Arc::new(provider))?;
                 }
                 DeferredSource::Graphql {
                     qualified,
@@ -248,16 +248,19 @@ impl Engine {
                     auth,
                     table,
                 } => {
-                    let batches = fetch_graphql(endpoint, auth.as_ref(), table).await?;
-                    register_memtable(&ctx, qualified, batches)?;
+                    let provider =
+                        GraphqlTableProvider::new(endpoint.clone(), auth.clone(), table.clone())?;
+                    register_table(&ctx, qualified, Arc::new(provider))?;
                 }
                 DeferredSource::Postgres {
                     qualified,
                     connection,
                     relation,
                 } => {
-                    let batches = read_postgres(connection, relation).await?;
-                    register_memtable(&ctx, qualified, batches)?;
+                    let provider =
+                        PostgresTableProvider::discover(connection.clone(), relation.clone())
+                            .await?;
+                    register_table(&ctx, qualified, Arc::new(provider))?;
                 }
             }
         }
@@ -384,300 +387,631 @@ async fn register_parquet(ctx: &SessionContext, qualified: &str, path: &str) -> 
     Ok(())
 }
 
-/// Materialise a list of `RecordBatch`es as a `MemTable` and register
-/// it. Used by Excel / GraphQL / Postgres sources whose v1 strategy is
-/// "fetch-and-cache" rather than streaming.
-fn register_memtable(
-    ctx: &SessionContext,
-    qualified: &str,
-    batches: Vec<RecordBatch>,
-) -> Result<()> {
-    if batches.is_empty() {
-        return Err(EngineError::NotYetImplemented(
-            "memtable source returned zero batches; an empty schema is not yet supported",
-        ));
-    }
-    let schema = batches[0].schema();
-    let provider = Arc::new(
-        datafusion::datasource::MemTable::try_new(schema, vec![batches])
-            .map_err(DataFusionError::from)?,
-    );
-    register_table(ctx, qualified, provider)
+// ----------------------------------------------------------------
+// Pushdown: a tiny shared helper that turns a DataFusion `Expr`
+// representing `column OP literal` (or `column IS [NOT] NULL`) into
+// a structured `(column, op, literal)` triple, plus a flag for
+// `IS NULL` / `IS NOT NULL`. Returns None for anything we don't know
+// how to push down — the caller then reports `Unsupported` to
+// DataFusion so the engine evaluates the predicate above the scan.
+// ----------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+enum PushedOp {
+    Eq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    IsNull,
+    IsNotNull,
+    In, // value is a comma-joined list of the IN-list literals
 }
 
-/// Read an Excel sheet into a single `RecordBatch`. v1 limitations:
-/// every column is typed as Utf8 (string). Type inference can be
-/// added later by sampling rows the same way `dbfy detect` does for
-/// CSV.
-fn read_excel(cfg: &dbfy_config::ExcelTableConfig) -> Result<Vec<RecordBatch>> {
-    use arrow_array::{ArrayRef, StringArray};
-    use arrow_schema::{Field, Schema};
-    use calamine::{Data, Reader, open_workbook_auto};
+#[derive(Debug, Clone)]
+struct PushedFilter {
+    column: String,
+    op: PushedOp,
+    /// Always populated except for `IS [NOT] NULL`. For `IN`, the
+    /// individual list elements are joined later by each backend.
+    literal: Option<datafusion::scalar::ScalarValue>,
+    /// IN-list values (empty for non-IN).
+    in_values: Vec<datafusion::scalar::ScalarValue>,
+}
 
-    let mut workbook = open_workbook_auto(&cfg.path).map_err(|err| {
-        EngineError::NotYetImplemented(Box::leak(
-            format!("excel: open `{}` failed: {err}", cfg.path).into_boxed_str(),
-        ))
-    })?;
-    let sheet_name: String = match &cfg.sheet {
-        Some(name) => name.clone(),
-        None => workbook
-            .sheet_names()
-            .first()
-            .cloned()
-            .ok_or(EngineError::NotYetImplemented(
-                "excel: workbook has no sheets",
-            ))?,
-    };
-    let range = workbook.worksheet_range(&sheet_name).map_err(|err| {
-        EngineError::NotYetImplemented(Box::leak(
-            format!("excel: sheet `{sheet_name}` not found: {err}").into_boxed_str(),
-        ))
-    })?;
-
-    let mut rows = range.rows();
-    let header_names: Vec<String> = if cfg.has_header {
-        rows.next()
-            .map(|row| {
-                row.iter()
-                    .enumerate()
-                    .map(|(i, cell)| match cell {
-                        Data::String(s) if !s.is_empty() => s.clone(),
-                        Data::Empty => format!("col_{i}"),
-                        other => other.to_string(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        let first = rows.next();
-        let n = first.map(|r| r.len()).unwrap_or(0);
-        (0..n).map(|i| format!("col_{i}")).collect()
-    };
-
-    if header_names.is_empty() {
-        return Err(EngineError::NotYetImplemented("excel: empty sheet"));
-    }
-
-    let mut columns: Vec<Vec<Option<String>>> = vec![Vec::new(); header_names.len()];
-    if !cfg.has_header {
-        // We consumed the first row in `rows.next()` above; rewind
-        // by re-opening the range so that row participates in the
-        // data set.
-        rows = range.rows();
-    }
-    for row in rows {
-        for (i, cell) in row.iter().enumerate().take(header_names.len()) {
-            let s = match cell {
-                Data::Empty => None,
-                Data::String(s) => Some(s.clone()),
-                Data::Int(n) => Some(n.to_string()),
-                Data::Float(n) => Some(n.to_string()),
-                Data::Bool(b) => Some(b.to_string()),
-                Data::DateTime(dt) => Some(dt.to_string()),
-                Data::Error(e) => Some(format!("#ERROR:{e:?}")),
-                Data::DurationIso(s) | Data::DateTimeIso(s) => Some(s.clone()),
+fn try_extract_pushed_filter(expr: &Expr) -> Option<PushedFilter> {
+    match expr {
+        Expr::BinaryExpr(bin) => {
+            let (col, lit, flipped) = match (&*bin.left, &*bin.right) {
+                (Expr::Column(c), Expr::Literal(s, _)) => (c.name.clone(), s.clone(), false),
+                (Expr::Literal(s, _), Expr::Column(c)) => (c.name.clone(), s.clone(), true),
+                _ => return None,
             };
-            columns[i].push(s);
+            let op = match (bin.op, flipped) {
+                (Operator::Eq, _) => PushedOp::Eq,
+                (Operator::NotEq, _) => PushedOp::NotEq,
+                (Operator::Lt, false) | (Operator::Gt, true) => PushedOp::Lt,
+                (Operator::LtEq, false) | (Operator::GtEq, true) => PushedOp::LtEq,
+                (Operator::Gt, false) | (Operator::Lt, true) => PushedOp::Gt,
+                (Operator::GtEq, false) | (Operator::LtEq, true) => PushedOp::GtEq,
+                _ => return None,
+            };
+            Some(PushedFilter {
+                column: col,
+                op,
+                literal: Some(lit),
+                in_values: vec![],
+            })
         }
-        // Pad short rows with None so all columns stay the same length.
-        for col in columns.iter_mut().skip(row.len()) {
-            col.push(None);
+        Expr::IsNull(inner) => {
+            if let Expr::Column(c) = &**inner {
+                Some(PushedFilter {
+                    column: c.name.clone(),
+                    op: PushedOp::IsNull,
+                    literal: None,
+                    in_values: vec![],
+                })
+            } else {
+                None
+            }
         }
+        Expr::IsNotNull(inner) => {
+            if let Expr::Column(c) = &**inner {
+                Some(PushedFilter {
+                    column: c.name.clone(),
+                    op: PushedOp::IsNotNull,
+                    literal: None,
+                    in_values: vec![],
+                })
+            } else {
+                None
+            }
+        }
+        Expr::InList(in_list) => {
+            if in_list.negated {
+                return None;
+            }
+            let col = match &*in_list.expr {
+                Expr::Column(c) => c.name.clone(),
+                _ => return None,
+            };
+            let mut vals = Vec::with_capacity(in_list.list.len());
+            for v in &in_list.list {
+                match v {
+                    Expr::Literal(s, _) => vals.push(s.clone()),
+                    _ => return None,
+                }
+            }
+            if vals.is_empty() {
+                return None;
+            }
+            Some(PushedFilter {
+                column: col,
+                op: PushedOp::In,
+                literal: None,
+                in_values: vals,
+            })
+        }
+        _ => None,
     }
+}
 
-    let fields: Vec<Field> = header_names
-        .iter()
-        .map(|name| Field::new(name, arrow_schema::DataType::Utf8, true))
-        .collect();
-    let arrays: Vec<ArrayRef> = columns
-        .into_iter()
-        .map(|col| {
-            let strs: Vec<Option<&str>> = col.iter().map(|s| s.as_deref()).collect();
-            Arc::new(StringArray::from(strs)) as ArrayRef
+fn scalar_to_sql_literal(s: &datafusion::scalar::ScalarValue) -> Option<String> {
+    use datafusion::scalar::ScalarValue as S;
+    match s {
+        S::Boolean(Some(v)) => Some(v.to_string()),
+        S::Int8(Some(v)) => Some(v.to_string()),
+        S::Int16(Some(v)) => Some(v.to_string()),
+        S::Int32(Some(v)) => Some(v.to_string()),
+        S::Int64(Some(v)) => Some(v.to_string()),
+        S::UInt8(Some(v)) => Some(v.to_string()),
+        S::UInt16(Some(v)) => Some(v.to_string()),
+        S::UInt32(Some(v)) => Some(v.to_string()),
+        S::UInt64(Some(v)) => Some(v.to_string()),
+        S::Float32(Some(v)) => Some(v.to_string()),
+        S::Float64(Some(v)) => Some(v.to_string()),
+        S::Utf8(Some(s)) | S::LargeUtf8(Some(s)) => Some(format!("'{}'", s.replace('\'', "''"))),
+        _ => None,
+    }
+}
+
+fn scalar_to_plain_string(s: &datafusion::scalar::ScalarValue) -> Option<String> {
+    use datafusion::scalar::ScalarValue as S;
+    match s {
+        S::Boolean(Some(v)) => Some(v.to_string()),
+        S::Int8(Some(v)) => Some(v.to_string()),
+        S::Int16(Some(v)) => Some(v.to_string()),
+        S::Int32(Some(v)) => Some(v.to_string()),
+        S::Int64(Some(v)) => Some(v.to_string()),
+        S::Float32(Some(v)) => Some(v.to_string()),
+        S::Float64(Some(v)) => Some(v.to_string()),
+        S::Utf8(Some(s)) | S::LargeUtf8(Some(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+// ----------------------------------------------------------------
+// PostgresTableProvider — pushes filter / projection / limit into a
+// `SELECT ... FROM <relation> WHERE ... LIMIT N` over the wire
+// protocol so the Postgres planner can use indexes.
+// ----------------------------------------------------------------
+
+#[derive(Debug)]
+struct PostgresTableProvider {
+    connection: String,
+    relation: String,
+    schema: SchemaRef,
+}
+
+impl PostgresTableProvider {
+    async fn discover(connection: String, relation: String) -> Result<Self> {
+        use tokio_postgres::NoTls;
+
+        let (client, conn) = tokio_postgres::connect(&connection, NoTls)
+            .await
+            .map_err(|err| {
+                EngineError::NotYetImplemented(Box::leak(
+                    format!("postgres: connect failed: {err}").into_boxed_str(),
+                ))
+            })?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        // Run a zero-row prepared SELECT to extract column metadata.
+        let stmt = client
+            .prepare(&format!("SELECT * FROM {relation} LIMIT 0"))
+            .await
+            .map_err(|err| {
+                EngineError::NotYetImplemented(Box::leak(
+                    format!("postgres: prepare for `{relation}` failed: {err}").into_boxed_str(),
+                ))
+            })?;
+
+        let fields = pg_columns_to_arrow_fields(stmt.columns());
+        let schema = Arc::new(arrow_schema::Schema::new(fields));
+        Ok(Self {
+            connection,
+            relation,
+            schema,
         })
-        .collect();
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema, arrays).map_err(|err| {
-        EngineError::NotYetImplemented(Box::leak(
-            format!("excel: build batch: {err}").into_boxed_str(),
-        ))
-    })?;
-    Ok(vec![batch])
-}
+    }
 
-/// Fetch a GraphQL query and convert its JSON response to a single
-/// `RecordBatch`. Reuses the REST provider's column-config + JSONPath
-/// extraction by going through the in-memory translation.
-async fn fetch_graphql(
-    endpoint: &str,
-    auth: Option<&dbfy_config::AuthConfig>,
-    table: &dbfy_config::GraphqlTableConfig,
-) -> Result<Vec<RecordBatch>> {
-    use serde_json::json;
-
-    let client = reqwest::Client::builder()
-        .user_agent(concat!(
-            "dbfy/",
-            env!("CARGO_PKG_VERSION"),
-            " (+https://github.com/frhack/dbfy)"
-        ))
-        .build()
-        .map_err(|err| {
-            EngineError::NotYetImplemented(Box::leak(
-                format!("graphql: build client: {err}").into_boxed_str(),
-            ))
-        })?;
-
-    let mut request = client.post(endpoint).json(&json!({ "query": table.query }));
-    if let Some(auth_cfg) = auth {
-        match auth_cfg {
-            dbfy_config::AuthConfig::Bearer { token_env } => {
-                let token = std::env::var(token_env).map_err(|_| {
-                    EngineError::NotYetImplemented(Box::leak(
-                        format!("graphql: env var `{token_env}` not set").into_boxed_str(),
-                    ))
-                })?;
-                request = request.bearer_auth(token);
+    /// Translate a single `Expr` into a Postgres `WHERE` fragment. Used
+    /// both for `supports_filters_pushdown` (yes/no) and for actually
+    /// building the SQL in `scan`.
+    fn translate_filter(filter: &Expr) -> Option<String> {
+        let p = try_extract_pushed_filter(filter)?;
+        let col = format!("\"{}\"", p.column.replace('"', "\"\""));
+        match p.op {
+            PushedOp::IsNull => Some(format!("{col} IS NULL")),
+            PushedOp::IsNotNull => Some(format!("{col} IS NOT NULL")),
+            PushedOp::In => {
+                let parts: Vec<String> = p
+                    .in_values
+                    .iter()
+                    .filter_map(scalar_to_sql_literal)
+                    .collect();
+                if parts.len() != p.in_values.len() {
+                    return None;
+                }
+                Some(format!("{col} IN ({})", parts.join(", ")))
             }
-            dbfy_config::AuthConfig::None => {}
-            _ => {
-                return Err(EngineError::NotYetImplemented(
-                    "graphql: only `none` and `bearer` auth are supported in v1",
-                ));
+            op => {
+                let lit = scalar_to_sql_literal(p.literal.as_ref()?)?;
+                let op_str = match op {
+                    PushedOp::Eq => "=",
+                    PushedOp::NotEq => "!=",
+                    PushedOp::Lt => "<",
+                    PushedOp::LtEq => "<=",
+                    PushedOp::Gt => ">",
+                    PushedOp::GtEq => ">=",
+                    _ => unreachable!(),
+                };
+                Some(format!("{col} {op_str} {lit}"))
             }
         }
     }
-    let response = request.send().await.map_err(|err| {
-        EngineError::NotYetImplemented(Box::leak(
-            format!("graphql: HTTP failure: {err}").into_boxed_str(),
-        ))
-    })?;
-    let body: serde_json::Value = response.json().await.map_err(|err| {
-        EngineError::NotYetImplemented(Box::leak(
-            format!("graphql: response was not JSON: {err}").into_boxed_str(),
-        ))
-    })?;
 
-    // Use serde_json_path to evaluate the root JSONPath.
-    let root_path = serde_json_path::JsonPath::parse(&table.root).map_err(|err| {
-        EngineError::NotYetImplemented(Box::leak(
-            format!("graphql: invalid root path `{}`: {err}", table.root).into_boxed_str(),
-        ))
-    })?;
-    let nodes = root_path.query(&body);
-    let rows: Vec<&serde_json::Value> = nodes.iter().copied().collect();
-
-    json_rows_to_batch(&rows, &table.columns)
+    fn build_sql(
+        &self,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> String {
+        let cols = match projection {
+            None => "*".to_string(),
+            Some(indices) if indices.is_empty() => "1".to_string(),
+            Some(indices) => indices
+                .iter()
+                .map(|i| format!("\"{}\"", self.schema.field(*i).name().replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let mut sql = format!("SELECT {cols} FROM {}", self.relation);
+        let where_clauses: Vec<String> =
+            filters.iter().filter_map(Self::translate_filter).collect();
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+        if let Some(n) = limit {
+            sql.push_str(&format!(" LIMIT {n}"));
+        }
+        sql
+    }
 }
 
-/// Read a Postgres relation into RecordBatches. v1 strategy:
-/// `SELECT * FROM <relation>`, fetch all rows, convert via the
-/// pg-row-to-arrow shim. Filter / projection / limit pushdown is
-/// future work.
-async fn read_postgres(connection: &str, relation: &str) -> Result<Vec<RecordBatch>> {
-    use tokio_postgres::NoTls;
-
-    let (client, conn) = tokio_postgres::connect(connection, NoTls)
-        .await
-        .map_err(|err| {
-            EngineError::NotYetImplemented(Box::leak(
-                format!("postgres: connect failed: {err}").into_boxed_str(),
-            ))
-        })?;
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let sql = format!("SELECT * FROM {relation}");
-    let rows = client.query(sql.as_str(), &[]).await.map_err(|err| {
-        EngineError::NotYetImplemented(Box::leak(
-            format!("postgres: query `{sql}` failed: {err}").into_boxed_str(),
-        ))
-    })?;
-
-    if rows.is_empty() {
-        return Err(EngineError::NotYetImplemented(
-            "postgres: empty result; v1 needs at least one row to infer schema",
-        ));
+#[async_trait]
+impl TableProvider for PostgresTableProvider {
+    fn as_any(&self) -> &(dyn std::any::Any + 'static) {
+        self
     }
-    pg_rows_to_batch(&rows)
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> std::result::Result<Vec<TableProviderFilterPushDown>, DataFusionError> {
+        Ok(filters
+            .iter()
+            .map(|f| {
+                if Self::translate_filter(f).is_some() {
+                    TableProviderFilterPushDown::Exact
+                } else {
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect())
+    }
+    async fn scan(
+        &self,
+        _state: &dyn datafusion::catalog::Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        use tokio_postgres::NoTls;
+
+        let target_schema = projected_schema(self.schema.clone(), projection)?;
+        let sql = self.build_sql(projection, filters, limit);
+
+        let (client, conn) = tokio_postgres::connect(&self.connection, NoTls)
+            .await
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let rows = client
+            .query(sql.as_str(), &[])
+            .await
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+
+        let batch = pg_rows_to_batch_with_schema(
+            &rows,
+            &target_schema,
+            projection.is_some_and(|p| p.is_empty()),
+        )
+        .map_err(|err| DataFusionError::External(Box::new(err)))?;
+
+        let exec: Arc<dyn ExecutionPlan> =
+            datafusion::catalog::memory::MemorySourceConfig::try_new_exec(
+                &[vec![batch]],
+                target_schema,
+                None,
+            )?;
+        Ok(exec)
+    }
 }
 
-/// Convert a list of JSON value references to a `RecordBatch` using
-/// the `ColumnConfig` JSONPath/type pairs the user declared in YAML.
-/// Mirrors what `dbfy-provider-rest` does for REST sources but for an
-/// already-materialised JSON tree.
-fn json_rows_to_batch(
-    rows: &[&serde_json::Value],
-    columns: &BTreeMap<String, dbfy_config::ColumnConfig>,
-) -> Result<Vec<RecordBatch>> {
-    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
-    use arrow_schema::{DataType as ArrowDataType, Field, Schema};
+fn pg_columns_to_arrow_fields(columns: &[tokio_postgres::Column]) -> Vec<arrow_schema::Field> {
+    use arrow_schema::{DataType as ArrowDataType, Field};
+    use tokio_postgres::types::Type as PgType;
 
-    if columns.is_empty() {
-        return Err(EngineError::NotYetImplemented(
-            "graphql: at least one column must be declared",
-        ));
-    }
-
-    let mut col_paths: Vec<(
-        &String,
-        &dbfy_config::ColumnConfig,
-        serde_json_path::JsonPath,
-    )> = Vec::new();
-    for (name, cfg) in columns {
-        let path = serde_json_path::JsonPath::parse(&cfg.path).map_err(|err| {
-            EngineError::NotYetImplemented(Box::leak(
-                format!("graphql: invalid column path `{}`: {err}", cfg.path).into_boxed_str(),
-            ))
-        })?;
-        col_paths.push((name, cfg, path));
-    }
-
-    let n_rows = rows.len();
-    let fields: Vec<Field> = col_paths
+    columns
         .iter()
-        .map(|(name, cfg, _)| {
-            let dt = match cfg.r#type {
-                dbfy_config::DataType::Boolean => ArrowDataType::Boolean,
-                dbfy_config::DataType::Int64 => ArrowDataType::Int64,
-                dbfy_config::DataType::Float64 => ArrowDataType::Float64,
+        .map(|col| {
+            let dt = match *col.type_() {
+                PgType::BOOL => ArrowDataType::Boolean,
+                PgType::INT2 | PgType::INT4 | PgType::INT8 => ArrowDataType::Int64,
+                PgType::FLOAT4 | PgType::FLOAT8 => ArrowDataType::Float64,
                 _ => ArrowDataType::Utf8,
             };
-            Field::new(name.as_str(), dt, true)
+            Field::new(col.name(), dt, true)
         })
-        .collect();
+        .collect()
+}
 
-    let mut arrays: Vec<ArrayRef> = Vec::new();
-    for (_, cfg, path) in &col_paths {
-        match cfg.r#type {
-            dbfy_config::DataType::Boolean => {
-                let vals: Vec<Option<bool>> = rows
-                    .iter()
-                    .map(|row| path.query(row).first().and_then(|v| v.as_bool()))
-                    .collect();
+fn pg_rows_to_batch_with_schema(
+    rows: &[tokio_postgres::Row],
+    target_schema: &SchemaRef,
+    is_count_star: bool,
+) -> Result<RecordBatch> {
+    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
+    use tokio_postgres::types::Type as PgType;
+
+    if is_count_star {
+        // count(*) projection — empty schema, only num_rows matters.
+        let opts = arrow_array::RecordBatchOptions::new().with_row_count(Some(rows.len()));
+        return RecordBatch::try_new_with_options(target_schema.clone(), vec![], &opts).map_err(
+            |err| {
+                EngineError::NotYetImplemented(Box::leak(
+                    format!("postgres count(*): {err}").into_boxed_str(),
+                ))
+            },
+        );
+    }
+
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(target_schema.fields().len());
+    for (out_idx, out_field) in target_schema.fields().iter().enumerate() {
+        match out_field.data_type() {
+            arrow_schema::DataType::Boolean => {
+                let vals: Vec<Option<bool>> =
+                    rows.iter().map(|r| r.try_get(out_idx).ok()).collect();
                 arrays.push(Arc::new(BooleanArray::from(vals)));
             }
-            dbfy_config::DataType::Int64 => {
+            arrow_schema::DataType::Int64 => {
                 let vals: Vec<Option<i64>> = rows
                     .iter()
-                    .map(|row| path.query(row).first().and_then(|v| v.as_i64()))
+                    .map(|r| {
+                        // Try i64 first, then fallback to i32/i16 widening.
+                        r.try_get::<_, i64>(out_idx)
+                            .ok()
+                            .or_else(|| r.try_get::<_, i32>(out_idx).ok().map(i64::from))
+                            .or_else(|| r.try_get::<_, i16>(out_idx).ok().map(i64::from))
+                    })
                     .collect();
                 arrays.push(Arc::new(Int64Array::from(vals)));
             }
-            dbfy_config::DataType::Float64 => {
+            arrow_schema::DataType::Float64 => {
                 let vals: Vec<Option<f64>> = rows
                     .iter()
-                    .map(|row| path.query(row).first().and_then(|v| v.as_f64()))
+                    .map(|r| {
+                        r.try_get::<_, f64>(out_idx)
+                            .ok()
+                            .or_else(|| r.try_get::<_, f32>(out_idx).ok().map(f64::from))
+                    })
                     .collect();
                 arrays.push(Arc::new(Float64Array::from(vals)));
             }
             _ => {
                 let vals: Vec<Option<String>> = rows
                     .iter()
-                    .map(|row| {
-                        path.query(row).first().map(|v| match v {
+                    .map(|r| r.try_get::<_, String>(out_idx).ok())
+                    .collect();
+                let strs: Vec<Option<&str>> = vals.iter().map(|s| s.as_deref()).collect();
+                arrays.push(Arc::new(StringArray::from(strs)));
+            }
+        }
+        let _ = PgType::TEXT; // keep PgType import alive across cfg branches
+    }
+    RecordBatch::try_new(target_schema.clone(), arrays).map_err(|err| {
+        EngineError::NotYetImplemented(Box::leak(
+            format!("postgres: build batch: {err}").into_boxed_str(),
+        ))
+    })
+}
+
+// ----------------------------------------------------------------
+// GraphqlTableProvider — POST + variables pushdown via a YAML
+// `pushdown.variables.<column>` mapping that names which GraphQL
+// variable receives the predicate value.
+// ----------------------------------------------------------------
+
+#[derive(Debug)]
+struct GraphqlTableProvider {
+    endpoint: String,
+    auth: Option<dbfy_config::AuthConfig>,
+    table: dbfy_config::GraphqlTableConfig,
+    schema: SchemaRef,
+}
+
+impl GraphqlTableProvider {
+    fn new(
+        endpoint: String,
+        auth: Option<dbfy_config::AuthConfig>,
+        table: dbfy_config::GraphqlTableConfig,
+    ) -> Result<Self> {
+        let fields: Vec<arrow_schema::Field> = table
+            .columns
+            .iter()
+            .map(|(name, cfg)| {
+                let dt = match cfg.r#type {
+                    dbfy_config::DataType::Boolean => arrow_schema::DataType::Boolean,
+                    dbfy_config::DataType::Int64 => arrow_schema::DataType::Int64,
+                    dbfy_config::DataType::Float64 => arrow_schema::DataType::Float64,
+                    _ => arrow_schema::DataType::Utf8,
+                };
+                arrow_schema::Field::new(name.as_str(), dt, true)
+            })
+            .collect();
+        Ok(Self {
+            endpoint,
+            auth,
+            table,
+            schema: Arc::new(arrow_schema::Schema::new(fields)),
+        })
+    }
+
+    /// A column is pushable when the YAML's `pushdown.variables` block
+    /// names a GraphQL variable for it. Without that mapping we can't
+    /// translate a `WHERE` predicate into a query variable.
+    fn translates_to_variable(
+        &self,
+        filter: &Expr,
+    ) -> Option<(String, datafusion::scalar::ScalarValue)> {
+        let p = try_extract_pushed_filter(filter)?;
+        if !matches!(p.op, PushedOp::Eq) {
+            return None;
+        }
+        let var = self.table.pushdown.as_ref()?.variables.get(&p.column)?;
+        Some((var.clone(), p.literal?))
+    }
+}
+
+#[async_trait]
+impl TableProvider for GraphqlTableProvider {
+    fn as_any(&self) -> &(dyn std::any::Any + 'static) {
+        self
+    }
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> std::result::Result<Vec<TableProviderFilterPushDown>, DataFusionError> {
+        Ok(filters
+            .iter()
+            .map(|f| {
+                if self.translates_to_variable(f).is_some() {
+                    TableProviderFilterPushDown::Exact
+                } else {
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect())
+    }
+    async fn scan(
+        &self,
+        _state: &dyn datafusion::catalog::Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        use serde_json::json;
+
+        let target_schema = projected_schema(self.schema.clone(), projection)?;
+
+        let mut variables = serde_json::Map::new();
+        for f in filters {
+            if let Some((var, value)) = self.translates_to_variable(f) {
+                let json_val = match scalar_to_plain_string(&value) {
+                    Some(s) => match value {
+                        datafusion::scalar::ScalarValue::Boolean(Some(b)) => {
+                            serde_json::Value::Bool(b)
+                        }
+                        datafusion::scalar::ScalarValue::Int64(Some(n)) => {
+                            serde_json::Value::Number(n.into())
+                        }
+                        datafusion::scalar::ScalarValue::Float64(Some(n)) => {
+                            serde_json::Number::from_f64(n)
+                                .map(serde_json::Value::Number)
+                                .unwrap_or(serde_json::Value::Null)
+                        }
+                        _ => serde_json::Value::String(s),
+                    },
+                    None => continue,
+                };
+                variables.insert(var, json_val);
+            }
+        }
+
+        let body = json!({
+            "query": self.table.query,
+            "variables": variables,
+        });
+        let client = reqwest::Client::builder()
+            .user_agent(concat!(
+                "dbfy/",
+                env!("CARGO_PKG_VERSION"),
+                " (+https://github.com/frhack/gh:dbfy)"
+            ))
+            .build()
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        let mut req = client.post(&self.endpoint).json(&body);
+        if let Some(auth) = &self.auth {
+            if let dbfy_config::AuthConfig::Bearer { token_env } = auth {
+                let token = std::env::var(token_env).map_err(|_| {
+                    DataFusionError::External(Box::<dyn std::error::Error + Send + Sync>::from(
+                        format!("graphql: env var `{token_env}` not set"),
+                    ))
+                })?;
+                req = req.bearer_auth(token);
+            }
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        let root_path = serde_json_path::JsonPath::parse(&self.table.root)
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        let nodes = root_path.query(&body);
+        let mut rows: Vec<&serde_json::Value> = nodes.iter().copied().collect();
+        if let Some(n) = limit {
+            rows.truncate(n);
+        }
+
+        let batch = build_json_batch_with_schema(&rows, &target_schema, &self.table.columns)
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        let exec: Arc<dyn ExecutionPlan> =
+            datafusion::catalog::memory::MemorySourceConfig::try_new_exec(
+                &[vec![batch]],
+                target_schema,
+                None,
+            )?;
+        Ok(exec)
+    }
+}
+
+fn build_json_batch_with_schema(
+    rows: &[&serde_json::Value],
+    target_schema: &SchemaRef,
+    columns: &BTreeMap<String, dbfy_config::ColumnConfig>,
+) -> Result<RecordBatch> {
+    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
+
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(target_schema.fields().len());
+    for field in target_schema.fields() {
+        let cfg = columns.get(field.name()).ok_or_else(|| {
+            EngineError::NotYetImplemented(Box::leak(
+                format!("graphql: missing column config for `{}`", field.name()).into_boxed_str(),
+            ))
+        })?;
+        let path = serde_json_path::JsonPath::parse(&cfg.path).map_err(|err| {
+            EngineError::NotYetImplemented(Box::leak(
+                format!("graphql: invalid path `{}`: {err}", cfg.path).into_boxed_str(),
+            ))
+        })?;
+        match field.data_type() {
+            arrow_schema::DataType::Boolean => {
+                let vals: Vec<Option<bool>> = rows
+                    .iter()
+                    .map(|r| path.query(r).first().and_then(|v| v.as_bool()))
+                    .collect();
+                arrays.push(Arc::new(BooleanArray::from(vals)));
+            }
+            arrow_schema::DataType::Int64 => {
+                let vals: Vec<Option<i64>> = rows
+                    .iter()
+                    .map(|r| path.query(r).first().and_then(|v| v.as_i64()))
+                    .collect();
+                arrays.push(Arc::new(Int64Array::from(vals)));
+            }
+            arrow_schema::DataType::Float64 => {
+                let vals: Vec<Option<f64>> = rows
+                    .iter()
+                    .map(|r| path.query(r).first().and_then(|v| v.as_f64()))
+                    .collect();
+                arrays.push(Arc::new(Float64Array::from(vals)));
+            }
+            _ => {
+                let vals: Vec<Option<String>> = rows
+                    .iter()
+                    .map(|r| {
+                        path.query(r).first().map(|v| match v {
                             serde_json::Value::String(s) => s.clone(),
                             other => other.to_string(),
                         })
@@ -688,95 +1022,255 @@ fn json_rows_to_batch(
             }
         }
     }
-    let _ = n_rows;
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema, arrays).map_err(|err| {
+    RecordBatch::try_new(target_schema.clone(), arrays).map_err(|err| {
         EngineError::NotYetImplemented(Box::leak(
             format!("graphql: build batch: {err}").into_boxed_str(),
         ))
-    })?;
-    Ok(vec![batch])
+    })
 }
 
-/// Convert tokio-postgres rows to a single `RecordBatch`. v1 type
-/// coverage: text + int4 + int8 + float4 + float8 + bool. Anything
-/// else is rendered as a debug string. This is intentionally narrow;
-/// proper Arrow type mapping (numeric / json / array / timestamp) is
-/// future work.
-fn pg_rows_to_batch(rows: &[tokio_postgres::Row]) -> Result<Vec<RecordBatch>> {
-    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
-    use arrow_schema::{DataType as ArrowDataType, Field, Schema};
-    use tokio_postgres::types::Type as PgType;
+// ----------------------------------------------------------------
+// ExcelTableProvider — opens the workbook, discovers schema from the
+// header row, then per-scan iterates rows and applies pushed
+// predicates while reading. The provider claims `Exact` for any
+// `column OP literal` against a string column (everything is string
+// in v1) so DataFusion drops the redundant filter.
+// ----------------------------------------------------------------
 
-    let row0 = &rows[0];
-    let cols = row0.columns();
+#[derive(Debug)]
+struct ExcelTableProvider {
+    cfg: dbfy_config::ExcelTableConfig,
+    schema: SchemaRef,
+    /// header indices: column name → cell index inside the source row
+    column_indices: Vec<usize>,
+}
 
-    let mut fields: Vec<Field> = Vec::with_capacity(cols.len());
-    for col in cols {
-        let dt = match *col.type_() {
-            PgType::BOOL => ArrowDataType::Boolean,
-            PgType::INT2 | PgType::INT4 | PgType::INT8 => ArrowDataType::Int64,
-            PgType::FLOAT4 | PgType::FLOAT8 => ArrowDataType::Float64,
-            _ => ArrowDataType::Utf8,
+impl ExcelTableProvider {
+    fn new(cfg: dbfy_config::ExcelTableConfig) -> Result<Self> {
+        use calamine::{Data, Reader, open_workbook_auto};
+
+        let mut wb = open_workbook_auto(&cfg.path).map_err(|err| {
+            EngineError::NotYetImplemented(Box::leak(
+                format!("excel: open `{}`: {err}", cfg.path).into_boxed_str(),
+            ))
+        })?;
+        let sheet_name = match &cfg.sheet {
+            Some(s) => s.clone(),
+            None => wb
+                .sheet_names()
+                .first()
+                .cloned()
+                .ok_or(EngineError::NotYetImplemented(
+                    "excel: workbook has no sheets",
+                ))?,
         };
-        fields.push(Field::new(col.name(), dt, true));
+        let range = wb.worksheet_range(&sheet_name).map_err(|err| {
+            EngineError::NotYetImplemented(Box::leak(
+                format!("excel: sheet `{sheet_name}`: {err}").into_boxed_str(),
+            ))
+        })?;
+        let mut row_iter = range.rows();
+        let header_names: Vec<String> = if cfg.has_header {
+            row_iter
+                .next()
+                .map(|row| {
+                    row.iter()
+                        .enumerate()
+                        .map(|(i, cell)| match cell {
+                            Data::String(s) if !s.is_empty() => s.clone(),
+                            Data::Empty => format!("col_{i}"),
+                            other => other.to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            let n = row_iter
+                .next()
+                .map(|r| r.len())
+                .ok_or(EngineError::NotYetImplemented("excel: empty sheet"))?;
+            (0..n).map(|i| format!("col_{i}")).collect()
+        };
+        if header_names.is_empty() {
+            return Err(EngineError::NotYetImplemented("excel: no columns detected"));
+        }
+        let fields: Vec<arrow_schema::Field> = header_names
+            .iter()
+            .map(|n| arrow_schema::Field::new(n.as_str(), arrow_schema::DataType::Utf8, true))
+            .collect();
+        let column_indices = (0..header_names.len()).collect();
+        Ok(Self {
+            cfg,
+            schema: Arc::new(arrow_schema::Schema::new(fields)),
+            column_indices,
+        })
     }
 
-    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(cols.len());
-    for (i, col) in cols.iter().enumerate() {
-        match *col.type_() {
-            PgType::BOOL => {
-                let vals: Vec<Option<bool>> = rows.iter().map(|r| r.try_get(i).ok()).collect();
-                arrays.push(Arc::new(BooleanArray::from(vals)));
-            }
-            PgType::INT2 => {
-                let vals: Vec<Option<i64>> = rows
-                    .iter()
-                    .map(|r| r.try_get::<_, i16>(i).ok().map(|v| v as i64))
-                    .collect();
-                arrays.push(Arc::new(Int64Array::from(vals)));
-            }
-            PgType::INT4 => {
-                let vals: Vec<Option<i64>> = rows
-                    .iter()
-                    .map(|r| r.try_get::<_, i32>(i).ok().map(|v| v as i64))
-                    .collect();
-                arrays.push(Arc::new(Int64Array::from(vals)));
-            }
-            PgType::INT8 => {
-                let vals: Vec<Option<i64>> =
-                    rows.iter().map(|r| r.try_get::<_, i64>(i).ok()).collect();
-                arrays.push(Arc::new(Int64Array::from(vals)));
-            }
-            PgType::FLOAT4 => {
-                let vals: Vec<Option<f64>> = rows
-                    .iter()
-                    .map(|r| r.try_get::<_, f32>(i).ok().map(|v| v as f64))
-                    .collect();
-                arrays.push(Arc::new(Float64Array::from(vals)));
-            }
-            PgType::FLOAT8 => {
-                let vals: Vec<Option<f64>> =
-                    rows.iter().map(|r| r.try_get::<_, f64>(i).ok()).collect();
-                arrays.push(Arc::new(Float64Array::from(vals)));
-            }
-            _ => {
-                let vals: Vec<Option<String>> = rows
-                    .iter()
-                    .map(|r| r.try_get::<_, String>(i).ok())
-                    .collect();
-                let strs: Vec<Option<&str>> = vals.iter().map(|s| s.as_deref()).collect();
-                arrays.push(Arc::new(StringArray::from(strs)));
-            }
-        }
+    fn translates_to_predicate(&self, filter: &Expr) -> Option<PushedFilter> {
+        let p = try_extract_pushed_filter(filter)?;
+        // Verify the column exists in our schema.
+        self.schema.index_of(&p.column).ok()?;
+        Some(p)
     }
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema, arrays).map_err(|err| {
-        EngineError::NotYetImplemented(Box::leak(
-            format!("postgres: build batch: {err}").into_boxed_str(),
-        ))
-    })?;
-    Ok(vec![batch])
+
+    fn row_matches(&self, row_str: &[Option<String>], predicates: &[PushedFilter]) -> bool {
+        predicates.iter().all(|p| {
+            let idx = match self.schema.index_of(&p.column) {
+                Ok(i) => i,
+                Err(_) => return false,
+            };
+            let cell = row_str.get(idx).and_then(|c| c.as_deref());
+            match &p.op {
+                PushedOp::IsNull => cell.is_none(),
+                PushedOp::IsNotNull => cell.is_some(),
+                PushedOp::In => p
+                    .in_values
+                    .iter()
+                    .filter_map(scalar_to_plain_string)
+                    .any(|v| cell == Some(v.as_str())),
+                op => {
+                    let lit = match p.literal.as_ref().and_then(scalar_to_plain_string) {
+                        Some(s) => s,
+                        None => return false,
+                    };
+                    match op {
+                        PushedOp::Eq => cell == Some(lit.as_str()),
+                        PushedOp::NotEq => cell != Some(lit.as_str()),
+                        PushedOp::Lt => cell.is_some_and(|c| c < lit.as_str()),
+                        PushedOp::LtEq => cell.is_some_and(|c| c <= lit.as_str()),
+                        PushedOp::Gt => cell.is_some_and(|c| c > lit.as_str()),
+                        PushedOp::GtEq => cell.is_some_and(|c| c >= lit.as_str()),
+                        _ => false,
+                    }
+                }
+            }
+        })
+    }
+}
+
+#[async_trait]
+impl TableProvider for ExcelTableProvider {
+    fn as_any(&self) -> &(dyn std::any::Any + 'static) {
+        self
+    }
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> std::result::Result<Vec<TableProviderFilterPushDown>, DataFusionError> {
+        Ok(filters
+            .iter()
+            .map(|f| {
+                if self.translates_to_predicate(f).is_some() {
+                    TableProviderFilterPushDown::Exact
+                } else {
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect())
+    }
+    async fn scan(
+        &self,
+        _state: &dyn datafusion::catalog::Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        use arrow_array::{ArrayRef, StringArray};
+        use calamine::{Data, Reader, open_workbook_auto};
+
+        let target_schema = projected_schema(self.schema.clone(), projection)?;
+        let predicates: Vec<PushedFilter> = filters
+            .iter()
+            .filter_map(|f| self.translates_to_predicate(f))
+            .collect();
+
+        let mut wb = open_workbook_auto(&self.cfg.path)
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        let sheet_name = match &self.cfg.sheet {
+            Some(s) => s.clone(),
+            None => wb.sheet_names().first().cloned().ok_or_else(|| {
+                DataFusionError::External(Box::<dyn std::error::Error + Send + Sync>::from(
+                    "excel: no sheets",
+                ))
+            })?,
+        };
+        let range = wb
+            .worksheet_range(&sheet_name)
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+
+        let n_cols = self.column_indices.len();
+        let mut columns: Vec<Vec<Option<String>>> = vec![Vec::new(); n_cols];
+        let mut rows_emitted = 0usize;
+        let row_iter = range.rows();
+        let mut iter = row_iter.into_iter();
+        if self.cfg.has_header {
+            iter.next();
+        }
+        for row in iter {
+            if let Some(n) = limit {
+                if rows_emitted >= n {
+                    break;
+                }
+            }
+            let mut row_str: Vec<Option<String>> = Vec::with_capacity(n_cols);
+            for i in 0..n_cols {
+                let cell = row.get(i);
+                let s = cell.and_then(|c| match c {
+                    Data::Empty => None,
+                    Data::String(s) => Some(s.clone()),
+                    Data::Int(n) => Some(n.to_string()),
+                    Data::Float(n) => Some(n.to_string()),
+                    Data::Bool(b) => Some(b.to_string()),
+                    Data::DateTime(dt) => Some(dt.to_string()),
+                    Data::Error(e) => Some(format!("#ERROR:{e:?}")),
+                    Data::DurationIso(s) | Data::DateTimeIso(s) => Some(s.clone()),
+                });
+                row_str.push(s);
+            }
+            if !self.row_matches(&row_str, &predicates) {
+                continue;
+            }
+            for (i, val) in row_str.into_iter().enumerate() {
+                columns[i].push(val);
+            }
+            rows_emitted += 1;
+        }
+
+        // Build the projected batch directly so we don't pay column
+        // copying for unused columns.
+        let projected_indices: Vec<usize> = match projection {
+            None => (0..n_cols).collect(),
+            Some(p) => p.clone(),
+        };
+        let arrays: Vec<ArrayRef> = projected_indices
+            .iter()
+            .map(|i| {
+                let strs: Vec<Option<&str>> = columns[*i].iter().map(|s| s.as_deref()).collect();
+                Arc::new(StringArray::from(strs)) as ArrayRef
+            })
+            .collect();
+        let batch = if projected_indices.is_empty() {
+            let opts = arrow_array::RecordBatchOptions::new().with_row_count(Some(rows_emitted));
+            RecordBatch::try_new_with_options(target_schema.clone(), vec![], &opts)
+        } else {
+            RecordBatch::try_new(target_schema.clone(), arrays)
+        }
+        .map_err(|err| DataFusionError::External(Box::new(err)))?;
+
+        let exec: Arc<dyn ExecutionPlan> =
+            datafusion::catalog::memory::MemorySourceConfig::try_new_exec(
+                &[vec![batch]],
+                target_schema,
+                None,
+            )?;
+        Ok(exec)
+    }
 }
 
 #[derive(Debug)]
@@ -2941,6 +3435,153 @@ sources:
             }
             _ => panic!("expected excel source"),
         }
+    }
+
+    #[tokio::test]
+    async fn graphql_pushdown_sends_variable_values_to_endpoint() {
+        // Wiremock asserts the POST body contains the GraphQL
+        // `variables.statusVar = "active"` payload — proves the WHERE
+        // clause was translated into a variable, not applied above
+        // the scan.
+        use wiremock::matchers::body_partial_json;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_partial_json(json!({
+                "variables": { "statusVar": "active" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "users": [
+                        {"login": "mario", "status": "active"},
+                        {"login": "anna",  "status": "active"}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+        // Fallback that should NEVER match if pushdown works.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "users": [{"login": "FALLBACK", "status": "x"}] }
+            })))
+            .mount(&server)
+            .await;
+
+        let yaml = format!(
+            r#"
+version: 1
+sources:
+  gh:
+    type: graphql
+    endpoint: "{server}/graphql"
+    tables:
+      users:
+        query: "query($statusVar: String) {{ users(status: $statusVar) {{ login status }} }}"
+        root: "$.data.users[*]"
+        columns:
+          login:  {{ path: "$.login",  type: string }}
+          status: {{ path: "$.status", type: string }}
+        pushdown:
+          variables:
+            status: statusVar
+"#,
+            server = server.uri(),
+        );
+        let config = Config::from_yaml_str(&yaml).expect("config");
+        let engine = Engine::from_config(config).expect("engine");
+        let batches = engine
+            .query("SELECT login FROM gh.users WHERE status = 'active'")
+            .await
+            .expect("graphql query");
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            total, 2,
+            "should match mario + anna; FALLBACK means pushdown didn't fire"
+        );
+    }
+
+    #[tokio::test]
+    async fn excel_pushdown_filters_at_read_time() {
+        use rust_xlsxwriter::Workbook;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let xlsx_path = dir.path().join("data.xlsx");
+        let mut wb = Workbook::new();
+        let sheet = wb.add_worksheet();
+        sheet.write_string(0, 0, "id").unwrap();
+        sheet.write_string(0, 1, "status").unwrap();
+        sheet.write_string(0, 2, "name").unwrap();
+        for (i, (status, name)) in [
+            ("active", "mario"),
+            ("inactive", "anna"),
+            ("active", "luca"),
+            ("active", "giulia"),
+            ("inactive", "paolo"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            sheet
+                .write_string((i + 1) as u32, 0, &(i + 1).to_string())
+                .unwrap();
+            sheet.write_string((i + 1) as u32, 1, *status).unwrap();
+            sheet.write_string((i + 1) as u32, 2, *name).unwrap();
+        }
+        wb.save(&xlsx_path).unwrap();
+
+        let yaml = format!(
+            r#"
+version: 1
+sources:
+  finance:
+    type: excel
+    tables:
+      records:
+        path: "{}"
+        has_header: true
+"#,
+            xlsx_path.display()
+        );
+        let config = Config::from_yaml_str(&yaml).expect("config");
+        let engine = Engine::from_config(config).expect("engine");
+        let batches = engine
+            .query("SELECT name FROM finance.records WHERE status = 'active' ORDER BY name")
+            .await
+            .expect("excel query");
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 3, "active rows: mario + luca + giulia");
+    }
+
+    #[test]
+    fn postgres_filter_translation_emits_correct_sql() {
+        // Unit test on the SQL builder: ensures `WHERE status =
+        // 'active' AND id >= 100` becomes the right Postgres syntax
+        // including identifier quoting and string escaping.
+        use arrow_schema::{DataType as ArrowDataType, Field, Schema};
+        use datafusion::logical_expr::{col, lit};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", ArrowDataType::Int64, false),
+            Field::new("status", ArrowDataType::Utf8, true),
+        ]));
+        let provider = super::PostgresTableProvider {
+            connection: "postgres://x".into(),
+            relation: "public.users".into(),
+            schema,
+        };
+        let f1 = col("status").eq(lit("active"));
+        let f2 = col("id").gt_eq(lit(100i64));
+        let sql = provider.build_sql(None, &[f1, f2], Some(50));
+        // Order between filters depends on input order; we joined in
+        // the same order via filter().filter_map().
+        assert!(sql.starts_with("SELECT * FROM public.users WHERE"), "{sql}");
+        assert!(sql.contains("\"status\" = 'active'"), "{sql}");
+        assert!(sql.contains("\"id\" >= 100"), "{sql}");
+        assert!(sql.ends_with("LIMIT 50"), "{sql}");
     }
 
     #[test]

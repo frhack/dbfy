@@ -227,11 +227,27 @@ impl GraphqlSourceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GraphqlTableConfig {
-    /// Literal GraphQL query body. Variables are not yet pushed down.
+    /// Literal GraphQL query body. Variables come from the
+    /// `pushdown.variables` mapping when DataFusion supplies a `WHERE
+    /// column = literal` predicate that matches a declared mapping.
     pub query: String,
     /// JSONPath into the response body (e.g. `$.data.users[*]`).
     pub root: String,
     pub columns: BTreeMap<String, ColumnConfig>,
+    /// Optional pushdown configuration. When a SQL filter `WHERE
+    /// <column> = <literal>` arrives, the corresponding GraphQL
+    /// variable from `variables` gets the literal at query time.
+    #[serde(default)]
+    pub pushdown: Option<GraphqlPushdownConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphqlPushdownConfig {
+    /// Map from SQL column name → GraphQL variable name. The query
+    /// must declare a matching `$<variable>` argument; dbfy injects
+    /// the literal value at scan time.
+    #[serde(default)]
+    pub variables: BTreeMap<String, String>,
 }
 
 // ---------------------------------------------------------------
