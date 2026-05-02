@@ -1,6 +1,7 @@
 package com.dbfy;
 
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Java bindings for the embedded dbfy federated SQL engine.
@@ -49,6 +50,26 @@ public final class Dbfy implements AutoCloseable {
     }
 
     /**
+     * Execute a SQL query asynchronously. The returned future is completed
+     * (with Arrow IPC bytes on success, or a {@link RuntimeException} on
+     * failure) by a tokio worker thread that the JVM is attached to on
+     * the fly via {@code AttachCurrentThread}. Continuations registered
+     * via {@code thenApply} / {@code whenComplete} run on the JVM common
+     * fork-join pool unless an explicit executor is provided.
+     *
+     * <p>The native side spawns the query on its existing tokio runtime
+     * and returns immediately, so the Java caller's thread is never
+     * parked waiting for the native query.
+     */
+    public CompletableFuture<byte[]> queryAsyncArrowIpc(String sql) {
+        Objects.requireNonNull(sql, "sql");
+        ensureOpen();
+        CompletableFuture<byte[]> future = new CompletableFuture<>();
+        nativeQueryAsync(handle, sql, future);
+        return future;
+    }
+
+    /**
      * Render the optimized logical plan with pushdown details.
      */
     public String explain(String sql) {
@@ -82,4 +103,7 @@ public final class Dbfy implements AutoCloseable {
     private static native byte[] nativeQuery(long handle, String sql);
 
     private static native String nativeExplain(long handle, String sql);
+
+    private static native void nativeQueryAsync(long handle, String sql,
+            CompletableFuture<byte[]> future);
 }

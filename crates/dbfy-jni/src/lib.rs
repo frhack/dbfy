@@ -15,12 +15,16 @@ use arrow_ipc::writer::StreamWriter;
 use dbfy_config::Config;
 use dbfy_frontend_datafusion::Engine;
 use jni::JNIEnv;
-use jni::objects::{JClass, JString};
+use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::{jbyteArray, jlong, jstring};
 use tokio::runtime::Runtime;
 
 struct JniEngine {
-    inner: Engine,
+    /// Wrapped in `Arc` so the async entry point can clone a handle
+    /// into the tokio task it spawns without holding a borrow on the
+    /// caller's `*const JniEngine`. Sync entry points still call
+    /// through the `Arc` via deref — no measurable overhead.
+    inner: Arc<Engine>,
     runtime: Arc<Runtime>,
 }
 
@@ -80,7 +84,7 @@ pub extern "system" fn Java_com_dbfy_Dbfy_nativeNewEmpty<'local>(
         }
     };
     Box::into_raw(Box::new(JniEngine {
-        inner: Engine::default(),
+        inner: Arc::new(Engine::default()),
         runtime,
     })) as jlong
 }
@@ -165,6 +169,128 @@ pub extern "system" fn Java_com_dbfy_Dbfy_nativeQuery<'local>(
     }
 }
 
+// ----------------------------------------------------------------
+// Async query — non-blocking entry point.
+//
+// The Java side hands us a `CompletableFuture<byte[]>` and returns
+// it immediately to its caller. We pin the future as a JNI
+// `GlobalRef`, spawn the query on the engine's tokio runtime, and on
+// completion (success or failure) attach the producer's tokio thread
+// to the JVM and invoke either `complete(byte[])` or
+// `completeExceptionally(Throwable)`. The GlobalRef is dropped from
+// the same JNI scope so it's collectable as soon as Java releases it.
+// ----------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_dbfy_Dbfy_nativeQueryAsync<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    sql: JString<'local>,
+    future: JObject<'local>,
+) {
+    let Some(engine) = handle_to_engine(handle, &mut env) else {
+        return;
+    };
+    let sql_str: String = match env.get_string(&sql) {
+        Ok(s) => s.into(),
+        Err(err) => {
+            throw(&mut env, err.to_string());
+            return;
+        }
+    };
+
+    // Pin the CompletableFuture across the call → callback round
+    // trip. Local refs go away when nativeQueryAsync returns; only
+    // a global ref survives.
+    let future_ref = match env.new_global_ref(future) {
+        Ok(r) => r,
+        Err(err) => {
+            throw(&mut env, err.to_string());
+            return;
+        }
+    };
+    // Get a handle to the JavaVM so the spawn closure can attach the
+    // tokio worker thread when it's time to deliver the result.
+    let java_vm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(err) => {
+            throw(&mut env, err.to_string());
+            return;
+        }
+    };
+
+    let inner = engine.inner.clone();
+    engine.runtime.spawn(async move {
+        let outcome = inner.query(&sql_str).await;
+        // Attach the current tokio thread to the JVM. The guard
+        // detaches it on drop. NB: re-attaching a JVM-owned thread
+        // is a no-op, so this is safe regardless of where tokio
+        // happens to be running this future.
+        let mut env = match java_vm.attach_current_thread() {
+            Ok(env) => env,
+            Err(_) => {
+                // We can't surface the error — the future will hang.
+                // In practice this only fails if the JVM is being
+                // shut down, in which case Java consumers won't be
+                // looking at this future anyway.
+                return;
+            }
+        };
+        match outcome {
+            Ok(batches) => deliver_success(&mut env, &future_ref, &batches),
+            Err(err) => deliver_failure(&mut env, &future_ref, &err.to_string()),
+        }
+        // future_ref drops here, releasing the global ref.
+    });
+}
+
+/// Encode the batches as Arrow IPC and call `CompletableFuture.complete(byte[])`.
+fn deliver_success(
+    env: &mut JNIEnv,
+    future_ref: &jni::objects::GlobalRef,
+    batches: &[RecordBatch],
+) {
+    let bytes = match batches_to_ipc(batches) {
+        Ok(b) => b,
+        Err(err) => return deliver_failure(env, future_ref, &err),
+    };
+    let array = match env.byte_array_from_slice(&bytes) {
+        Ok(a) => a,
+        Err(err) => return deliver_failure(env, future_ref, &err.to_string()),
+    };
+    // CompletableFuture.complete returns boolean — we ignore it.
+    let _ = env.call_method(
+        future_ref.as_obj(),
+        "complete",
+        "(Ljava/lang/Object;)Z",
+        &[JValue::Object(&array)],
+    );
+}
+
+/// Construct a RuntimeException with the message and call
+/// `CompletableFuture.completeExceptionally(Throwable)`.
+fn deliver_failure(env: &mut JNIEnv, future_ref: &jni::objects::GlobalRef, message: &str) {
+    let msg_obj = match env.new_string(message) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let throwable = match env.new_object(
+        "java/lang/RuntimeException",
+        "(Ljava/lang/String;)V",
+        &[JValue::Object(&msg_obj)],
+    ) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let _ = env.call_method(
+        future_ref.as_obj(),
+        "completeExceptionally",
+        "(Ljava/lang/Throwable;)Z",
+        &[JValue::Object(&throwable)],
+    );
+}
+
 fn build_engine(
     env: &mut JNIEnv,
     engine: Result<Engine, dbfy_frontend_datafusion::EngineError>,
@@ -184,7 +310,7 @@ fn build_engine(
         }
     };
     Box::into_raw(Box::new(JniEngine {
-        inner: engine,
+        inner: Arc::new(engine),
         runtime,
     })) as jlong
 }
