@@ -5,9 +5,10 @@
 [![pypi](https://img.shields.io/pypi/v/dbfy.svg)](https://pypi.org/project/dbfy/)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Embedded SQL federation engine.** Bring REST APIs and line-delimited log
-files (jsonl, csv, logfmt, syslog, regex) to the same SQL surface as your
-Parquet, CSV, and in-memory data — no glue scripts, no `pd.merge`.
+**Everything\* is a SQL table.** APIs, logs, files, your CSV scratch dir —
+joined declaratively in one SELECT.
+
+<sub>\*If yours isn't yet, file a bug — that's the contract.</sub>
 
 ```sql
 -- One SELECT joining two REST endpoints and a local JSONL log:
@@ -21,6 +22,7 @@ SELECT s.zone, count(*) AS hot_acked
 ```
 
 → **[Quickstart](docs/quickstart.md)** — five minutes, zero to your first SQL query.
+→ **[Showcase](examples/showcase/)** — end-to-end demo + integration test against the live GitHub API + 50k JSONL + 5×syslog.
 
 ## Install
 
@@ -29,7 +31,7 @@ SELECT s.zone, count(*) AS hot_acked
 pip install dbfy
 ```
 
-**CLI binary** (Linux x86_64, macOS x86_64/arm64) — download from [Releases](https://github.com/frhack/dbfy/releases) and add to `PATH`.
+**CLI binary** (Linux x86_64, macOS arm64) — download from [Releases](https://github.com/frhack/dbfy/releases) and add to `PATH`.
 
 **DuckDB extension** — also on the Releases page (`dbfy-<target>.duckdb_extension`); load with:
 ```sql
@@ -42,26 +44,27 @@ git clone https://github.com/frhack/dbfy && cd dbfy
 cargo build --release -p dbfy-cli
 ```
 
-## What it does
+## Supported languages and modes
 
-- **REST/HTTP** — GET endpoints with page / offset / cursor / link-header
-  pagination, retry + `Retry-After`, four auth modes, RFC 9535 JSONPath,
-  filter + projection + limit pushdown, in-memory TTL+singleflight HTTP
-  cache.
-- **Line-delimited files** — jsonl, csv, logfmt, regex (CLF/ELF), syslog
-  (RFC 5424). L3 indexing via persistent `.dbfy_idx` sidecar: zone maps,
-  bloom filters, prefix-hash invalidation, incremental EXTEND on
-  append-only growth, glob multi-file expansion.
-- **Two SQL frontends share one core**:
-  - **Standalone CLI** (`dbfy validate / inspect / explain / query`) backed
-    by a DataFusion engine, with onboarding helpers (`dbfy detect`,
-    `dbfy probe`, `dbfy init`, `dbfy index`, `dbfy duckdb-attach`).
-  - **DuckDB extension** — `LOAD 'dbfy.duckdb_extension'` exposes
-    `dbfy_rest()` and `dbfy_rows_file()` table functions to any DuckDB
-    host (Python, R, JS, JVM, CLI).
-- **Language bindings** — Python (sync + `asyncio`, PyArrow zero-copy via
-  the Arrow C Data Interface, type stubs), C (`cbindgen`), Java
-  (`jni` + Arrow IPC).
+### Modes
+
+| Mode | Install | Use |
+|---|---|---|
+| **CLI binary** | [Releases](https://github.com/frhack/dbfy/releases) (Linux x86_64, macOS arm64) | `dbfy query --config x.yaml "SELECT …"` |
+| **DuckDB extension** | [Releases](https://github.com/frhack/dbfy/releases) → `LOAD 'dbfy.duckdb_extension'` | `SELECT * FROM dbfy_rest('…')` / `dbfy_rows_file('…')` |
+| **Python** | `pip install dbfy` | `import dbfy; engine = dbfy.Engine.from_yaml(…)` (sync + `asyncio`, PyArrow zero-copy) |
+| **Rust library** | path / git dep on `dbfy-frontend-datafusion` | `use dbfy_frontend_datafusion::Engine;` |
+| **C** | `libdbfy.{a,so}` + `dbfy.h` (cbindgen-generated) | engine lifecycle + Arrow C Data Interface |
+| **Java / Kotlin** | `dbfy-jni` + `com.dbfy.Dbfy` | Arrow IPC bytes → `ArrowStreamReader` |
+
+### Sources
+
+| Kind | Status | Coverage |
+|---|---|---|
+| **REST / HTTP** | ✅ stable | page / offset / cursor / link-header pagination · 4 auth modes · retry + `Retry-After` · in-memory TTL + singleflight HTTP cache · filter pushdown into URL params |
+| **Line-delimited files** | ✅ stable | JSONL · CSV · logfmt · syslog (RFC 5424) · regex (CLF / ELF) — with L3 indexing (zone maps + bloom + incremental EXTEND on append) and glob multi-file expansion |
+| **In-memory programmatic** | ✅ stable | static Arrow `RecordBatch` provider · Python-defined custom providers via Arrow C Data Interface |
+| **Coming next** | 🟡 wishlist — file a bug to vote | GraphQL · gRPC · Parquet remote · XML · LDAP · HTML / DOM scraping |
 
 ## Layout
 
@@ -78,11 +81,14 @@ crates/
 docs/
   quickstart.md
   implementation-plan.md
+examples/
+  showcase/                     # end-to-end demo + validator
 ```
 
 ## Documentation
 
 - **[Quickstart](docs/quickstart.md)** — install, build, first query (CLI + DuckDB).
+- **[Showcase](examples/showcase/)** — runnable end-to-end demo: GitHub API × 50k JSONL × 5×syslog joined in one SELECT, with timing + skip-ratio numbers.
 - [Implementation plan](docs/implementation-plan.md) — milestone-by-milestone history.
 - [DuckDB extension reference](crates/dbfy-frontend-duckdb/README.md) — table-function syntax, demo, capabilities matrix.
 - [Python bindings](crates/dbfy-py/README.md) — `maturin develop` wheel + API.
