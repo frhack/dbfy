@@ -5,13 +5,14 @@
 [![pypi](https://img.shields.io/pypi/v/dbfy.svg)](https://pypi.org/project/dbfy/)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Everything\* is a SQL table.** APIs, logs, files, your CSV scratch dir —
-joined declaratively in one SELECT.
+**Everything\* is a SQL table.** Each source — REST API, log file, CSV,
+JSONL, syslog — gets its own typed table in your schema. Cross-source
+JOINs work natively.
 
 <sub>\*If yours isn't yet, file a bug — that's the contract.</sub>
 
 ```sql
--- One SELECT joining two REST endpoints and a local JSONL log:
+-- Three sources, three tables, one query:
 SELECT s.zone, count(*) AS hot_acked
   FROM dbfy_rest('https://api.example.com/readings', config := '...') r
   JOIN dbfy_rest('https://api.example.com/sensors',  config := '...') s USING (sensor_id)

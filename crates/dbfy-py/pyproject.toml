@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "dbfy"
 version = "0.1.0"
-description = "Everything is a SQL table: query REST APIs, log files, and CSV through one SELECT."
+description = "Each source is a SQL table: REST APIs, log files, CSV, JSONL, syslog — one schema, cross-source JOINs."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
