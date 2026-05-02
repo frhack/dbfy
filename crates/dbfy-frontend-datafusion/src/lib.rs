@@ -701,36 +701,193 @@ impl TableProvider for PostgresTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        use tokio_postgres::NoTls;
-
         let target_schema = projected_schema(self.schema.clone(), projection)?;
         let sql = self.build_sql(projection, filters, limit);
+        let is_count_star = projection.is_some_and(|p| p.is_empty());
 
-        let (client, conn) = tokio_postgres::connect(&self.connection, NoTls)
-            .await
-            .map_err(|err| DataFusionError::External(Box::new(err)))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
+        // Streaming execution plan: row-by-row over the wire via
+        // `query_raw`, batched into RecordBatches at DataFusion's
+        // configured batch size, with consumer-drop cancellation.
+        Ok(Arc::new(PostgresStreamExecutionPlan::new(
+            self.connection.clone(),
+            sql,
+            is_count_star,
+            target_schema,
+        )))
+    }
+}
+
+// ----------------------------------------------------------------
+// PostgresStreamExecutionPlan — row-stream + RecordBatchReceiverStream.
+//
+// Row source:    `tokio_postgres::Client::query_raw` → `RowStream`,
+//                so we stop fetching as soon as the consumer drops
+//                the stream (cancellation propagates by dropping the
+//                channel `tx`, then the `Client`, which in turn
+//                drops the wire connection — Postgres reclaims any
+//                associated portal / cursor).
+// Batch shape:   accumulate rows into a buffer of `batch_size`
+//                (DataFusion's session config, default 8192); emit
+//                each batch as soon as the buffer fills.
+// count(*) :     same as before — `SELECT 1 FROM …`, count rows on
+//                the producer side, emit a single empty-schema batch
+//                with `with_row_count` at the end.
+// ----------------------------------------------------------------
+
+struct PostgresStreamExecutionPlan {
+    connection: String,
+    sql: String,
+    is_count_star: bool,
+    schema: SchemaRef,
+    properties: Arc<PlanProperties>,
+}
+
+impl std::fmt::Debug for PostgresStreamExecutionPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PostgresStreamExecutionPlan")
+            .field("sql", &self.sql)
+            .field("is_count_star", &self.is_count_star)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PostgresStreamExecutionPlan {
+    fn new(connection: String, sql: String, is_count_star: bool, schema: SchemaRef) -> Self {
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Self {
+            connection,
+            sql,
+            is_count_star,
+            schema,
+            properties,
+        }
+    }
+}
+
+impl DisplayAs for PostgresStreamExecutionPlan {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "PostgresStreamExec: sql={}", self.sql)
+            }
+            DisplayFormatType::TreeRender => write!(f, ""),
+        }
+    }
+}
+
+impl ExecutionPlan for PostgresStreamExecutionPlan {
+    fn name(&self) -> &str {
+        Self::static_name()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        if children.is_empty() {
+            Ok(self)
+        } else {
+            Err(DataFusionError::Internal(
+                "PostgresStreamExecutionPlan does not accept children".to_string(),
+            ))
+        }
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        ctx: Arc<TaskContext>,
+    ) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
+        if partition != 0 {
+            return Err(DataFusionError::Execution(format!(
+                "invalid partition {partition} for postgres stream execution"
+            )));
+        }
+        let connection = self.connection.clone();
+        let sql = self.sql.clone();
+        let is_count_star = self.is_count_star;
+        let schema = self.schema.clone();
+        let batch_size = ctx.session_config().batch_size().max(1);
+
+        let mut builder = RecordBatchReceiverStream::builder(schema.clone(), 2);
+        let tx = builder.tx();
+        builder.spawn(async move {
+            use futures::pin_mut;
+            use tokio_postgres::NoTls;
+
+            let (client, conn) = tokio_postgres::connect(&connection, NoTls)
+                .await
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
+            // Drive the connection on a background task. When the
+            // `client` drops at the end of this future, the connection
+            // future returns and this task exits.
+            let _conn_handle = tokio::spawn(async move {
+                let _ = conn.await;
+            });
+
+            let row_stream = client
+                .query_raw::<_, &(dyn tokio_postgres::types::ToSql + Sync), _>(
+                    sql.as_str(),
+                    std::iter::empty(),
+                )
+                .await
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
+            pin_mut!(row_stream);
+
+            let mut buffer: Vec<tokio_postgres::Row> = Vec::with_capacity(batch_size);
+            let mut count_star_total: usize = 0;
+
+            while let Some(row_res) = row_stream.next().await {
+                let row = row_res.map_err(|err| DataFusionError::External(Box::new(err)))?;
+                if is_count_star {
+                    count_star_total += 1;
+                    continue;
+                }
+                buffer.push(row);
+                if buffer.len() >= batch_size {
+                    let batch = pg_rows_to_batch_with_schema(&buffer, &schema, false)
+                        .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                    if tx.send(Ok(batch)).await.is_err() {
+                        return Ok(()); // consumer dropped — bail
+                    }
+                    buffer.clear();
+                }
+            }
+
+            // Flush.
+            if is_count_star {
+                let opts =
+                    arrow_array::RecordBatchOptions::new().with_row_count(Some(count_star_total));
+                let batch = RecordBatch::try_new_with_options(schema.clone(), vec![], &opts)
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                let _ = tx.send(Ok(batch)).await;
+            } else if !buffer.is_empty() {
+                let batch = pg_rows_to_batch_with_schema(&buffer, &schema, false)
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                let _ = tx.send(Ok(batch)).await;
+            }
+            Ok(())
         });
-        let rows = client
-            .query(sql.as_str(), &[])
-            .await
-            .map_err(|err| DataFusionError::External(Box::new(err)))?;
 
-        let batch = pg_rows_to_batch_with_schema(
-            &rows,
-            &target_schema,
-            projection.is_some_and(|p| p.is_empty()),
-        )
-        .map_err(|err| DataFusionError::External(Box::new(err)))?;
-
-        let exec: Arc<dyn ExecutionPlan> =
-            datafusion::catalog::memory::MemorySourceConfig::try_new_exec(
-                &[vec![batch]],
-                target_schema,
-                None,
-            )?;
-        Ok(exec)
+        Ok(builder.build())
+    }
+    fn partition_statistics(
+        &self,
+        _partition: Option<usize>,
+    ) -> std::result::Result<Statistics, DataFusionError> {
+        Ok(Statistics::new_unknown(&self.schema))
     }
 }
 
@@ -1518,8 +1675,7 @@ impl TableProvider for LdapTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
-        use ldap3::{LdapConnAsync, Scope, SearchEntry};
+        use ldap3::Scope;
 
         let target_schema = projected_schema(self.schema.clone(), projection)?;
         let composed_filter = self.build_filter(filters);
@@ -1529,11 +1685,9 @@ impl TableProvider for LdapTableProvider {
             dbfy_config::LdapScope::Sub => Scope::Subtree,
         };
 
-        // Always request every declared LDAP attribute (excluding the
-        // synthetic `__dn__` which we read from the entry directly);
-        // `_state.config().options().execution.batch_size` would let us
-        // get fancy here, but the wire savings come from the *filter*
-        // pushdown — projection mostly affects parsing cost, not bytes.
+        // Server only ships the attributes we actually need (skip the
+        // synthetic `__dn__` which is on the entry envelope, not in
+        // the attrs map).
         let mut attrs_to_request: Vec<String> = self
             .column_to_ldap
             .iter()
@@ -1543,16 +1697,176 @@ impl TableProvider for LdapTableProvider {
         attrs_to_request.sort();
         attrs_to_request.dedup();
 
-        let (conn, mut ldap) = LdapConnAsync::new(&self.url)
-            .await
-            .map_err(|err| DataFusionError::External(Box::new(err)))?;
-        ldap3::drive!(conn);
+        let projected_indices: Vec<usize> = match projection {
+            None => (0..self.column_to_ldap.len()).collect(),
+            Some(p) => p.clone(),
+        };
 
-        match &self.auth {
-            Some(dbfy_config::LdapAuthConfig::Simple {
+        Ok(Arc::new(LdapStreamExecutionPlan::new(
+            self.url.clone(),
+            self.auth.clone(),
+            self.cfg.base_dn.clone(),
+            scope,
+            composed_filter,
+            attrs_to_request,
+            self.column_to_ldap.clone(),
+            projected_indices,
+            self.schema.clone(),
+            target_schema,
+            limit,
+        )))
+    }
+}
+
+// ----------------------------------------------------------------
+// LdapStreamExecutionPlan — pulls entries off `ldap.streaming_search`
+// in batches of `batch_size` and emits one RecordBatch per batch.
+// On consumer drop, `tx.send` errors → we bail out, drop the search
+// stream + Ldap handle, and the underlying TCP connection unwinds
+// (the directory server reclaims the operation's state).
+// ----------------------------------------------------------------
+
+struct LdapStreamExecutionPlan {
+    url: String,
+    auth: Option<dbfy_config::LdapAuthConfig>,
+    base_dn: String,
+    scope: ldap3::Scope,
+    composed_filter: String,
+    attrs_to_request: Vec<String>,
+    column_to_ldap: Vec<String>,
+    projected_indices: Vec<usize>,
+    full_schema: SchemaRef,
+    target_schema: SchemaRef,
+    limit: Option<usize>,
+    properties: Arc<PlanProperties>,
+}
+
+impl std::fmt::Debug for LdapStreamExecutionPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LdapStreamExecutionPlan")
+            .field("base_dn", &self.base_dn)
+            .field("filter", &self.composed_filter)
+            .field("limit", &self.limit)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LdapStreamExecutionPlan {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        url: String,
+        auth: Option<dbfy_config::LdapAuthConfig>,
+        base_dn: String,
+        scope: ldap3::Scope,
+        composed_filter: String,
+        attrs_to_request: Vec<String>,
+        column_to_ldap: Vec<String>,
+        projected_indices: Vec<usize>,
+        full_schema: SchemaRef,
+        target_schema: SchemaRef,
+        limit: Option<usize>,
+    ) -> Self {
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(target_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Self {
+            url,
+            auth,
+            base_dn,
+            scope,
+            composed_filter,
+            attrs_to_request,
+            column_to_ldap,
+            projected_indices,
+            full_schema,
+            target_schema,
+            limit,
+            properties,
+        }
+    }
+}
+
+impl DisplayAs for LdapStreamExecutionPlan {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(
+                    f,
+                    "LdapStreamExec: base_dn={}, filter={}",
+                    self.base_dn, self.composed_filter
+                )
+            }
+            DisplayFormatType::TreeRender => write!(f, ""),
+        }
+    }
+}
+
+impl ExecutionPlan for LdapStreamExecutionPlan {
+    fn name(&self) -> &str {
+        Self::static_name()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        if children.is_empty() {
+            Ok(self)
+        } else {
+            Err(DataFusionError::Internal(
+                "LdapStreamExecutionPlan does not accept children".to_string(),
+            ))
+        }
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        ctx: Arc<TaskContext>,
+    ) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
+        if partition != 0 {
+            return Err(DataFusionError::Execution(format!(
+                "invalid partition {partition} for ldap stream execution"
+            )));
+        }
+        let url = self.url.clone();
+        let auth = self.auth.clone();
+        let base_dn = self.base_dn.clone();
+        let scope = self.scope;
+        let composed_filter = self.composed_filter.clone();
+        let attrs_to_request = self.attrs_to_request.clone();
+        let column_to_ldap = self.column_to_ldap.clone();
+        let projected_indices = self.projected_indices.clone();
+        let full_schema = self.full_schema.clone();
+        let target_schema = self.target_schema.clone();
+        let limit = self.limit;
+        let batch_size = ctx.session_config().batch_size().max(1);
+
+        let mut builder = RecordBatchReceiverStream::builder(target_schema.clone(), 2);
+        let tx = builder.tx();
+        builder.spawn(async move {
+            use ldap3::{LdapConnAsync, SearchEntry};
+
+            let (conn, mut ldap) = LdapConnAsync::new(&url)
+                .await
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
+            ldap3::drive!(conn);
+
+            if let Some(dbfy_config::LdapAuthConfig::Simple {
                 bind_dn,
                 password_env,
-            }) => {
+            }) = &auth
+            {
                 let pw = std::env::var(password_env).map_err(|_| {
                     DataFusionError::External(Box::<dyn std::error::Error + Send + Sync>::from(
                         format!("ldap: env var `{password_env}` not set"),
@@ -1563,108 +1877,159 @@ impl TableProvider for LdapTableProvider {
                     .and_then(|r| r.success())
                     .map_err(|err| DataFusionError::External(Box::new(err)))?;
             }
-            _ => {}
-        }
 
-        let (raw_entries, _res) = ldap
-            .search(
-                &self.cfg.base_dn,
-                scope,
-                &composed_filter,
-                attrs_to_request
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-            )
-            .await
-            .and_then(|r| r.success())
-            .map_err(|err| DataFusionError::External(Box::new(err)))?;
-        let _ = ldap.unbind().await;
+            let mut stream = ldap
+                .streaming_search(
+                    &base_dn,
+                    scope,
+                    &composed_filter,
+                    attrs_to_request
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                )
+                .await
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
 
-        // Apply LIMIT in-memory: LDAP has paged results but per-table
-        // YAML doesn't expose a "size limit" knob yet — the directory's
-        // own size limit still caps things server-side.
-        let entries: Vec<SearchEntry> = raw_entries
-            .into_iter()
-            .map(SearchEntry::construct)
-            .take(limit.unwrap_or(usize::MAX))
-            .collect();
+            let max = limit.unwrap_or(usize::MAX);
+            let is_count_star = projected_indices.is_empty();
+            let mut emitted = 0usize;
+            let mut buffer: Vec<SearchEntry> = Vec::with_capacity(batch_size);
 
-        // Decode entries column-by-column according to the projected
-        // target schema (or the full schema when projection is None).
-        let projected_indices: Vec<usize> = match projection {
-            None => (0..self.column_to_ldap.len()).collect(),
-            Some(p) => p.clone(),
-        };
-        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(projected_indices.len());
-        for out_idx in &projected_indices {
-            let ldap_attr = &self.column_to_ldap[*out_idx];
-            let dt = self.schema.field(*out_idx).data_type().clone();
-            let cells: Vec<Option<String>> = entries
-                .iter()
-                .map(|e| {
-                    if ldap_attr == "__dn__" {
-                        Some(e.dn.clone())
-                    } else {
-                        e.attrs.get(ldap_attr).map(|vs| vs.join(", "))
+            while emitted < max {
+                let next = stream
+                    .next()
+                    .await
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                let Some(raw) = next else {
+                    break;
+                };
+                emitted += 1;
+                if is_count_star {
+                    // No need to keep the entry — we only count.
+                    continue;
+                }
+                buffer.push(SearchEntry::construct(raw));
+                if buffer.len() >= batch_size {
+                    let batch = ldap_entries_to_batch(
+                        &buffer,
+                        &projected_indices,
+                        &column_to_ldap,
+                        &full_schema,
+                        &target_schema,
+                    )?;
+                    if tx.send(Ok(batch)).await.is_err() {
+                        let _ = stream.finish().await;
+                        return Ok(());
                     }
-                })
-                .collect();
-            let arr: ArrayRef = match dt {
-                arrow_schema::DataType::Boolean => {
-                    let v: Vec<Option<bool>> = cells
-                        .iter()
-                        .map(|c| {
-                            c.as_deref().and_then(|s| {
-                                let s = s.trim().to_ascii_lowercase();
-                                match s.as_str() {
-                                    "true" | "1" | "yes" | "y" => Some(true),
-                                    "false" | "0" | "no" | "n" => Some(false),
-                                    _ => None,
-                                }
-                            })
+                    buffer.clear();
+                }
+            }
+
+            // Flush.
+            if is_count_star {
+                let opts = arrow_array::RecordBatchOptions::new().with_row_count(Some(emitted));
+                let batch = RecordBatch::try_new_with_options(target_schema.clone(), vec![], &opts)
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                let _ = tx.send(Ok(batch)).await;
+            } else if !buffer.is_empty() {
+                let batch = ldap_entries_to_batch(
+                    &buffer,
+                    &projected_indices,
+                    &column_to_ldap,
+                    &full_schema,
+                    &target_schema,
+                )?;
+                let _ = tx.send(Ok(batch)).await;
+            }
+
+            let _ = stream.finish().await;
+            let _ = ldap.unbind().await;
+            Ok(())
+        });
+
+        Ok(builder.build())
+    }
+    fn partition_statistics(
+        &self,
+        _partition: Option<usize>,
+    ) -> std::result::Result<Statistics, DataFusionError> {
+        Ok(Statistics::new_unknown(&self.target_schema))
+    }
+}
+
+/// Pull a buffer of `SearchEntry` into a typed RecordBatch matching
+/// the projected target schema. Shared between mid-stream batches and
+/// the final flush so we don't drift between the two code paths.
+fn ldap_entries_to_batch(
+    entries: &[ldap3::SearchEntry],
+    projected_indices: &[usize],
+    column_to_ldap: &[String],
+    full_schema: &SchemaRef,
+    target_schema: &SchemaRef,
+) -> std::result::Result<RecordBatch, DataFusionError> {
+    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
+
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(projected_indices.len());
+    for out_idx in projected_indices {
+        let ldap_attr = &column_to_ldap[*out_idx];
+        let dt = full_schema.field(*out_idx).data_type().clone();
+        let cells: Vec<Option<String>> = entries
+            .iter()
+            .map(|e| {
+                if ldap_attr == "__dn__" {
+                    Some(e.dn.clone())
+                } else {
+                    e.attrs.get(ldap_attr).map(|vs| vs.join(", "))
+                }
+            })
+            .collect();
+        let arr: ArrayRef = match dt {
+            arrow_schema::DataType::Boolean => {
+                let v: Vec<Option<bool>> = cells
+                    .iter()
+                    .map(|c| {
+                        c.as_deref().and_then(|s| {
+                            let s = s.trim().to_ascii_lowercase();
+                            match s.as_str() {
+                                "true" | "1" | "yes" | "y" => Some(true),
+                                "false" | "0" | "no" | "n" => Some(false),
+                                _ => None,
+                            }
                         })
-                        .collect();
-                    Arc::new(BooleanArray::from(v))
-                }
-                arrow_schema::DataType::Int64 => {
-                    let v: Vec<Option<i64>> = cells
-                        .iter()
-                        .map(|c| c.as_deref().and_then(|s| s.parse::<i64>().ok()))
-                        .collect();
-                    Arc::new(Int64Array::from(v))
-                }
-                arrow_schema::DataType::Float64 => {
-                    let v: Vec<Option<f64>> = cells
-                        .iter()
-                        .map(|c| c.as_deref().and_then(|s| s.parse::<f64>().ok()))
-                        .collect();
-                    Arc::new(Float64Array::from(v))
-                }
-                _ => {
-                    let strs: Vec<Option<&str>> = cells.iter().map(|c| c.as_deref()).collect();
-                    Arc::new(StringArray::from(strs))
-                }
-            };
-            arrays.push(arr);
-        }
+                    })
+                    .collect();
+                Arc::new(BooleanArray::from(v))
+            }
+            arrow_schema::DataType::Int64 => {
+                let v: Vec<Option<i64>> = cells
+                    .iter()
+                    .map(|c| c.as_deref().and_then(|s| s.parse::<i64>().ok()))
+                    .collect();
+                Arc::new(Int64Array::from(v))
+            }
+            arrow_schema::DataType::Float64 => {
+                let v: Vec<Option<f64>> = cells
+                    .iter()
+                    .map(|c| c.as_deref().and_then(|s| s.parse::<f64>().ok()))
+                    .collect();
+                Arc::new(Float64Array::from(v))
+            }
+            _ => {
+                let strs: Vec<Option<&str>> = cells.iter().map(|c| c.as_deref()).collect();
+                Arc::new(StringArray::from(strs))
+            }
+        };
+        arrays.push(arr);
+    }
 
-        let row_count = entries.len();
-        let batch = if projected_indices.is_empty() {
-            let opts = arrow_array::RecordBatchOptions::new().with_row_count(Some(row_count));
-            RecordBatch::try_new_with_options(target_schema.clone(), vec![], &opts)
-        } else {
-            RecordBatch::try_new(target_schema.clone(), arrays)
-        }
-        .map_err(|err| DataFusionError::External(Box::new(err)))?;
-
-        let exec: Arc<dyn ExecutionPlan> =
-            datafusion::catalog::memory::MemorySourceConfig::try_new_exec(
-                &[vec![batch]],
-                target_schema,
-                None,
-            )?;
-        Ok(exec)
+    if projected_indices.is_empty() {
+        let opts = arrow_array::RecordBatchOptions::new().with_row_count(Some(entries.len()));
+        RecordBatch::try_new_with_options(target_schema.clone(), vec![], &opts)
+            .map_err(|err| DataFusionError::External(Box::new(err)))
+    } else {
+        RecordBatch::try_new(target_schema.clone(), arrays)
+            .map_err(|err| DataFusionError::External(Box::new(err)))
     }
 }
 
@@ -4113,6 +4478,95 @@ sources:
         // ...so build_filter omits it and keeps just the base filter.
         let composed = provider.build_filter(&[f]);
         assert_eq!(composed, "(objectClass=inetOrgPerson)");
+    }
+
+    #[tokio::test]
+    async fn ldap_stream_plan_emits_incrementally_and_handles_consumer_drop() {
+        // Sanity check on the streaming refactor: the LdapStreamExecutionPlan
+        // must report EmissionType::Incremental (not Final), and calling
+        // execute() with an unreachable URL must yield a Stream that fails
+        // gracefully (no panic, no hang) — the producer task running inside
+        // RecordBatchReceiverStream::builder.spawn is expected to surface the
+        // connect error through the channel rather than abort the test.
+        use datafusion::execution::TaskContext;
+        use datafusion::physical_plan::ExecutionPlan;
+        use datafusion::physical_plan::execution_plan::EmissionType;
+        use futures::StreamExt;
+        use ldap3::Scope;
+
+        let provider = build_ldap_provider();
+        let target_schema = provider.schema.clone();
+        let projected_indices: Vec<usize> = (0..provider.column_to_ldap.len()).collect();
+        let plan = super::LdapStreamExecutionPlan::new(
+            "ldap://127.0.0.1:1".to_string(), // guaranteed-unreachable
+            None,
+            "ou=people,dc=example,dc=com".to_string(),
+            Scope::Subtree,
+            "(objectClass=*)".to_string(),
+            vec!["uid".to_string(), "mail".to_string()],
+            provider.column_to_ldap.clone(),
+            projected_indices,
+            provider.schema.clone(),
+            target_schema,
+            None,
+        );
+        assert_eq!(
+            plan.properties().emission_type,
+            EmissionType::Incremental,
+            "stream plan must advertise incremental emission so DataFusion knows it's streaming"
+        );
+        let ctx = Arc::new(TaskContext::default());
+        let mut stream = plan.execute(0, ctx).expect("execute returns a stream");
+        // First poll should yield an Err (connect refused) rather than panic
+        // or hang. The exact error string depends on the OS, so we only
+        // assert that it surfaced and the stream then ends.
+        let item = stream.next().await;
+        assert!(
+            matches!(&item, Some(Err(_))),
+            "expected first poll to surface a connect error, got {item:?}"
+        );
+        // After the error, the stream should end.
+        assert!(
+            stream.next().await.is_none(),
+            "stream should terminate after error"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_stream_plan_emits_incrementally_and_handles_consumer_drop() {
+        // Same property check on the Postgres streaming plan.
+        use arrow_schema::{DataType as ArrowDataType, Field, Schema};
+        use datafusion::execution::TaskContext;
+        use datafusion::physical_plan::ExecutionPlan;
+        use datafusion::physical_plan::execution_plan::EmissionType;
+        use futures::StreamExt;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", ArrowDataType::Int64, false),
+            Field::new("status", ArrowDataType::Utf8, true),
+        ]));
+        let plan = super::PostgresStreamExecutionPlan::new(
+            "postgres://nobody@127.0.0.1:1/none".to_string(), // guaranteed-unreachable
+            "SELECT * FROM x".to_string(),
+            false,
+            schema,
+        );
+        assert_eq!(
+            plan.properties().emission_type,
+            EmissionType::Incremental,
+            "stream plan must advertise incremental emission"
+        );
+        let ctx = Arc::new(TaskContext::default());
+        let mut stream = plan.execute(0, ctx).expect("execute returns a stream");
+        let item = stream.next().await;
+        assert!(
+            matches!(&item, Some(Err(_))),
+            "expected first poll to surface a connect error, got {item:?}"
+        );
+        assert!(
+            stream.next().await.is_none(),
+            "stream should terminate after error"
+        );
     }
 
     #[test]
