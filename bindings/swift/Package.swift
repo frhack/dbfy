@@ -46,7 +46,7 @@ let package = Package(
         // `bindings/swift/release.sh`.
         .binaryTarget(
             name: "DbfyNative",
-            url: "https://github.com/frhack/dbfy/releases/download/v0.3.0/dbfy.xcframework.zip",
+            url: "https://github.com/frhack/dbfy/releases/download/v0.4.0/dbfy.xcframework.zip",
             checksum: "0000000000000000000000000000000000000000000000000000000000000000"
         ),
 

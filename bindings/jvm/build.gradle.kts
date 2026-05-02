@@ -10,7 +10,7 @@
 
 allprojects {
     group = "com.dbfy"
-    version = providers.gradleProperty("dbfy.version").getOrElse("0.3.0")
+    version = providers.gradleProperty("dbfy.version").getOrElse("0.4.0")
 
     repositories {
         mavenCentral()

@@ -1,6 +1,6 @@
 {
   "name": "@frhack/dbfy",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Each source is a SQL table: REST APIs, log files, Postgres, LDAP, Parquet — one schema, cross-source JOINs. Node.js bindings over the embedded dbfy engine.",
   "main": "index.js",
   "types": "index.d.ts",
