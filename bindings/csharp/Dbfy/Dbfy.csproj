@@ -14,7 +14,7 @@
 
     <!-- NuGet metadata. -->
     <PackageId>Dbfy</PackageId>
-    <Version>0.4.0</Version>
+    <Version>0.4.1</Version>
     <Authors>frhack</Authors>
     <Description>Each source is a SQL table: REST APIs, log files, CSV, JSONL, syslog — one schema, cross-source JOINs. .NET wrapper over the dbfy embedded SQL federation engine.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
